@@ -139,11 +139,12 @@ with st.sidebar:
     st.markdown("### 🏀 PropPulse+")
     st.markdown("---")
     
-    mode = st.radio(
-        "Analysis Mode",
-        ["🎯 Single Prop", "📊 Batch CSV Upload"],
-        index=0
-    )
+   mode = st.radio(
+    "Analysis Mode",
+    ["🎯 Single Prop", "📊 Batch Manual Entry"],
+    index=0
+)
+
     
     st.markdown("---")
     
@@ -352,127 +353,139 @@ if mode == "🎯 Single Prop":
                         st.code(model_output)
 
 # ==========================================
-# MODE 2: BATCH CSV UPLOAD
+# MODE 2: BATCH MANUAL ENTRY
 # ==========================================
 else:
-    st.markdown("### 📊 Batch CSV Analysis")
-    
+    st.markdown("### 🧠 Batch Manual Entry")
+
     st.info("""
-    📋 Upload a CSV file with the following columns:
-    - `player` (Player name)
-    - `stat` (PTS, REB, AST, REB+AST, PRA, FG3M)
-    - `line` (Numerical line)
-    - `odds` (American odds, e.g., -110)
+    Enter multiple props manually for quick batch analysis without a CSV file.
+    - Fill in player name, stat type, line, and odds
+    - Click **Analyze Batch** to process all at once
     """)
-    
-    uploaded_file = st.file_uploader("Choose CSV file", type=['csv'])
-    
-    if uploaded_file is not None:
-        try:
-            df = pd.read_csv(uploaded_file)
-            
-            st.write(f"📊 Loaded **{len(df)}** props")
-            st.dataframe(df.head(10), use_container_width=True)
-            
-            # Validate columns
-            required_cols = ['player', 'stat', 'line', 'odds']
-            missing = [col for col in required_cols if col not in df.columns]
-            
-            if missing:
-                st.error(f"❌ Missing required columns: {missing}")
-                st.info(f"Found columns: {list(df.columns)}")
-            else:
-                if st.button("🚀 Analyze All Props", type="primary"):
-                    settings = pe.load_settings()
-                    props_list = df.to_dict('records')
-                    
-                    progress_bar = st.progress(0)
-                    status_text = st.empty()
-                    
-                    results = []
-                    
-                    for i, prop in enumerate(props_list):
-                        status_text.text(f"Analyzing {i+1}/{len(props_list)}: {prop['player']}...")
-                        progress_bar.progress((i + 1) / len(props_list))
-                        
-                        try:
-                            result = pe.analyze_single_prop(
-                                prop['player'],
-                                prop['stat'],
-                                prop['line'],
-                                prop['odds'],
-                                settings
-                            )
-                            if result:
-                                results.append(result)
-                        except Exception as e:
-                            st.warning(f"⚠️ Skipped {prop['player']}: {str(e)}")
-                    
-                    progress_bar.empty()
-                    status_text.empty()
-                    
-                    if results:
-                        st.success(f"✅ Successfully analyzed {len(results)}/{len(props_list)} props!")
-                        
-                        results_df = pd.DataFrame(results)
-                        
-                        # Summary metrics
-                        col1, col2, col3 = st.columns(3)
-                        
-                        with col1:
-                            pos_ev = len([r for r in results if r['ev'] > 0])
-                            st.metric("Positive EV Props", pos_ev)
-                        
-                        with col2:
-                            avg_ev = sum(r['ev'] for r in results) / len(results)
-                            st.metric("Average EV", f"{avg_ev * 100:.1f}¢")
-                        
-                        with col3:
-                            top_ev = max(results, key=lambda x: x['ev'])
-                            st.metric("Top EV", f"{top_ev['ev'] * 100:.1f}¢")
-                        
-                        # Results table
-                        st.subheader("📋 All Results")
-                        
-                        display_df = results_df[[
-                            'player', 'stat', 'line', 'odds',
-                            'projection', 'p_model', 'ev', 'n_games'
-                        ]].copy()
-                        
-                        display_df['p_model'] = (display_df['p_model'] * 100).round(1)
-                        display_df['ev'] = (display_df['ev'] * 100).round(1)
-                        display_df['projection'] = display_df['projection'].round(1)
-                        
-                        display_df.rename(columns={
-                            'player': 'Player',
-                            'stat': 'Stat',
-                            'line': 'Line',
-                            'odds': 'Odds',
-                            'projection': 'Proj',
-                            'p_model': 'Model%',
-                            'ev': 'EV(¢)',
-                            'n_games': 'Games'
-                        }, inplace=True)
-                        
-                        st.dataframe(
-                            display_df.sort_values('EV(¢)', ascending=False),
-                            use_container_width=True,
-                            height=400
-                        )
-                        
-                        # Export button
-                        if st.button("💾 Generate Excel Dashboard"):
-                            with st.spinner("Generating Excel..."):
-                                pe.export_results_to_excel(results_df)
-                                st.success("✅ Excel file generated in /output folder!")
-                    else:
-                        st.error("❌ No valid results generated")
+
+    # Choose how many props to enter
+    n_props = st.number_input(
+        "How many props would you like to analyze?",
+        min_value=1,
+        max_value=20,
+        value=3
+    )
+
+    manual_entries = []
+    for i in range(int(n_props)):
+        st.markdown(f"#### Prop #{i+1}")
+        col1, col2, col3, col4 = st.columns(4)
+        with col1:
+            player = st.text_input(f"Player {i+1}", key=f"player_{i}", placeholder="e.g., LeBron James")
+        with col2:
+            stat = st.selectbox(
+                f"Stat {i+1}",
+                ["PTS", "REB", "AST", "REB+AST", "PRA", "FG3M"],
+                key=f"stat_{i}"
+            )
+        with col3:
+            line = st.number_input(f"Line {i+1}", min_value=0.0, max_value=100.0, value=20.0, key=f"line_{i}")
+        with col4:
+            odds = st.text_input(f"Odds {i+1}", value="-110", key=f"odds_{i}")
         
-        except Exception as e:
-            st.error(f"❌ Error processing CSV: {str(e)}")
-            import traceback
-            with st.expander("Show error details"):
-                st.code(traceback.format_exc())
+        if player.strip():
+            manual_entries.append({
+                "player": player,
+                "stat": stat,
+                "line": line,
+                "odds": odds
+            })
+
+    # Optional: Save these manual entries as a CSV for reuse
+    if manual_entries:
+        df_preview = pd.DataFrame(manual_entries)
+        st.subheader("📋 Preview")
+        st.dataframe(df_preview, use_container_width=True)
+        csv_data = df_preview.to_csv(index=False).encode('utf-8')
+        st.download_button("💾 Download These Entries as CSV", csv_data, "manual_entries.csv")
+
+    # Analyze Button
+    if st.button("🚀 Analyze Batch", type="primary"):
+        if not manual_entries:
+            st.error("⚠️ Please enter at least one valid player name.")
+            st.stop()
+
+        settings = pe.load_settings()
+        progress_bar = st.progress(0)
+        status_text = st.empty()
+        results = []
+
+        for i, entry in enumerate(manual_entries):
+            status_text.text(f"Analyzing {i+1}/{len(manual_entries)}: {entry['player']}...")
+            progress_bar.progress((i + 1) / len(manual_entries))
+            try:
+                result = pe.analyze_single_prop(
+                    entry["player"],
+                    entry["stat"],
+                    entry["line"],
+                    entry["odds"],
+                    settings
+                )
+                if result:
+                    results.append(result)
+            except Exception as e:
+                st.warning(f"⚠️ Skipped {entry['player']}: {str(e)}")
+
+        progress_bar.empty()
+        status_text.empty()
+
+        if results:
+            st.success(f"✅ Successfully analyzed {len(results)}/{len(manual_entries)} props!")
+
+            results_df = pd.DataFrame(results)
+
+            # Summary Metrics
+            col1, col2, col3 = st.columns(3)
+            with col1:
+                pos_ev = len([r for r in results if r['ev'] > 0])
+                st.metric("Positive EV Props", pos_ev)
+            with col2:
+                avg_ev = sum(r['ev'] for r in results) / len(results)
+                st.metric("Average EV", f"{avg_ev * 100:.1f}¢")
+            with col3:
+                top_ev = max(results, key=lambda x: x['ev'])
+                st.metric("Top EV", f"{top_ev['ev'] * 100:.1f}¢")
+
+            # Results Table
+            st.subheader("📊 All Results")
+            display_df = results_df[[
+                'player', 'stat', 'line', 'odds', 'projection', 'p_model', 'ev', 'n_games'
+            ]].copy()
+
+            display_df['p_model'] = (display_df['p_model'] * 100).round(1)
+            display_df['ev'] = (display_df['ev'] * 100).round(1)
+            display_df['projection'] = display_df['projection'].round(1)
+
+            display_df.rename(columns={
+                'player': 'Player',
+                'stat': 'Stat',
+                'line': 'Line',
+                'odds': 'Odds',
+                'projection': 'Proj',
+                'p_model': 'Model%',
+                'ev': 'EV(¢)',
+                'n_games': 'Games'
+            }, inplace=True)
+
+            st.dataframe(
+                display_df.sort_values('EV(¢)', ascending=False),
+                use_container_width=True,
+                height=400
+            )
+
+            # Export button
+            if st.button("💾 Generate Excel Dashboard"):
+                with st.spinner("Generating Excel..."):
+                    pe.export_results_to_excel(results_df)
+                    st.success("✅ Excel file generated in /output folder!")
+        else:
+            st.error("❌ No valid results generated. Double-check your inputs.")
 
 # ==========================================
 # FOOTER
