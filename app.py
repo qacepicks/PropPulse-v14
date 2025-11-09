@@ -139,12 +139,11 @@ with st.sidebar:
     st.markdown("### 🏀 PropPulse+")
     st.markdown("---")
     
-   mode = st.radio(
-    "Analysis Mode",
-    ["🎯 Single Prop", "📊 Batch Manual Entry"],
-    index=0
-)
-
+    mode = st.radio(
+        "Analysis Mode",
+        ["🎯 Single Prop", "📊 Batch Manual Entry"],
+        index=0
+    )
     
     st.markdown("---")
     
