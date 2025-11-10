@@ -13,6 +13,7 @@ import os, json, time, math
 from datetime import datetime, timezone
 from dvp_updater import load_dvp_data
 from nba_api.stats.endpoints import scoreboardv2
+from nba_api.stats.static import teams, players
 import pytz
 import math
 import glob
@@ -1126,6 +1127,53 @@ def debug_projection(df, stat="REB+AST", line=12.5, player_name=""):
 # ===============================
 # MAIN
 # ===============================
+def get_live_opponent_from_schedule(player_name):
+    """
+    Fetch today's opponent using NBA API — no BallDontLie dependency.
+    Works for any player by matching their team in today's official games.
+    """
+    try:
+        player_info = players.find_players_by_full_name(player_name)
+        if not player_info:
+            print(f"[Opponent] ⚠️ Could not find player: {player_name}")
+            return None, None
+
+        player_info = player_info[0]
+        team_id = player_info.get("team_id")
+        team_abbr = None
+
+        # Match team abbreviation
+        all_teams = teams.get_teams()
+        for t in all_teams:
+            if t["id"] == team_id:
+                team_abbr = t["abbreviation"]
+                break
+
+        if not team_abbr:
+            print(f"[Opponent] ⚠️ Could not find team for {player_name}")
+            return None, None
+
+        # Pull today’s NBA scoreboard
+        today = datetime.now(pytz.timezone("US/Eastern")).strftime("%Y-%m-%d")
+        board = scoreboardv2.ScoreboardV2(game_date=today)
+        games = board.get_normalized_dict().get("GameHeader", [])
+
+        for g in games:
+            home = g["HOME_TEAM_ABBREVIATION"]
+            away = g["VISITOR_TEAM_ABBREVIATION"]
+            if home == team_abbr:
+                return away, team_abbr
+            elif away == team_abbr:
+                return home, team_abbr
+
+        print(f"[Opponent] ⚠️ No matchup found for {team_abbr} today.")
+        return None, team_abbr
+
+    except Exception as e:
+        print(f"[Opponent] ❌ Error getting live opponent: {e}")
+        return None, None
+
+
 def analyze_single_prop(player, stat, line, odds, settings, debug_mode=False):
     """Analyze a single prop and return results dict"""
     path = os.path.join(settings["data_path"], f"{player.replace(' ', '_')}.csv")
@@ -1182,22 +1230,12 @@ def analyze_single_prop(player, stat, line, odds, settings, debug_mode=False):
     inj = get_injury_status(player, settings.get("injury_api_key"))
     pos = get_player_position_auto(player, df_logs=df, settings=settings)
 
-    # --- Get correct opponent (FIXED: keep inside function and properly indented) ---
-    opp = None
-    team_abbr = None
-    try:
-        player_data = get_bdl("/players", {"search": player.split()[-1]}, settings)
-        if player_data and "data" in player_data and len(player_data["data"]) > 0:
-            player_info = player_data["data"][0]
-            team_abbr = player_info.get("team", {}).get("abbreviation", None)
-    except Exception as e:
-        print(f"[Opponent] ⚠️ Error getting player team: {e}")
-
-    if team_abbr:
-        opp = get_today_opponent(team_abbr)
+    # --- Get correct opponent using live NBA schedule ---
+    opp, team_abbr = get_live_opponent_from_schedule(player)
     if not opp:
         opp = get_upcoming_opponent_abbr(player, settings=settings)
 
+    # If no opponent found, skip DvP to avoid stale data
     dvp_mult = get_dvp_multiplier(opp, pos, stat) if opp else 1.0
 
     if debug_mode:
@@ -1234,375 +1272,6 @@ def analyze_single_prop(player, stat, line, odds, settings, debug_mode=False):
         "dvp_mult": dvp_mult,
         "injury": inj
     }
-
-
-# ===============================
-# EXPORT HANDLER (PropPulse Dashboard Edition)
-# ===============================
-def export_results_to_excel(df):
-    """Enhanced PropPulse dashboard export with color tiers, summary, and heatmap."""
-    from openpyxl import load_workbook
-    from openpyxl.styles import PatternFill, Font, Alignment
-    from openpyxl.formatting.rule import ColorScaleRule
-    import platform, subprocess  # <-- ensure available here
-
-    output_dir = "output"
-    os.makedirs(output_dir, exist_ok=True)
-
-    timestamp = datetime.now().strftime("%Y-%m-%d_%H-%M")
-    xlsx_path = os.path.join(output_dir, f"model_output_{timestamp}.xlsx")
-    print("📈 Generating PropPulse Excel dashboard...\n")
-
-    rename_map = {
-        "player": "Player", "stat": "Stat", "line": "Line", "odds": "Odds",
-        "p_model": "Model Prob", "p_book": "Book Prob",
-        "projection": "Projection", "ev": "EV ($/1)", "dvp_mult": "DvP Mult",
-        "injury": "Injury"
-    }
-    df.rename(columns=rename_map, inplace=True, errors="ignore")
-
-    for col in ["Odds", "EV ($/1)", "Model Prob", "Book Prob"]:
-        if col not in df.columns:
-            df[col] = 0
-
-    VALID_ODDS_RANGE = (-140, 140)
-    SORT_MODE = "ev"
-
-    df["Model Prob"] = (df.get("Model Prob", 0) * 100).round(2)
-    df["Book Prob"] = (df.get("Book Prob", 0) * 100).round(2)
-    df["EV ($/1)"] = df.get("EV ($/1)", 0).round(4)
-
-    def ev_prizepicks(p_model):
-        return (p_model - 0.542) * 100
-
-    def assign_tier(ev, ev_min, ev_max):
-        if ev >= ev_max * 0.75:
-            return "ELITE"
-        elif ev >= ev_max * 0.40:
-            return "SOLID"
-        elif ev <= ev_min * 0.5:
-            return "FADE"
-        else:
-            return "NEUTRAL"
-
-    df_filtered = df[df["Odds"].between(*VALID_ODDS_RANGE)].copy()
-    df_filtered["EV (PrizePicks)"] = df_filtered["Model Prob"].apply(lambda x: ev_prizepicks(x / 100))
-    df_sorted = df_filtered.sort_values(
-        "Model Prob" if SORT_MODE == "prob" else "EV ($/1)", ascending=False
-    )
-
-    ev_min, ev_max = df_sorted["EV ($/1)"].min(), df_sorted["EV ($/1)"].max()
-    df_sorted["Tier"] = [
-        assign_tier(ev, ev_min, ev_max) if not pd.isna(ev) else ""
-        for ev in df_sorted["EV ($/1)"]
-    ]
-
-    df_sorted.to_excel(xlsx_path, index=False)
-    wb = load_workbook(xlsx_path)
-    ws = wb.active
-    ws.title = "ALL_PROPS"
-
-    for cell in ws[1]:
-        cell.font = Font(bold=True, color="FFFFFF")
-        cell.fill = PatternFill(start_color="404040", end_color="404040", fill_type="solid")
-        cell.alignment = Alignment(horizontal="center")
-
-    color_map = {"ELITE": "00C0A87E", "SOLID": "00FFD966", "FADE": "00E06666", "NEUTRAL": "00D9D9D9"}
-
-    tier_col = [c.column for c in ws[1] if c.value == "Tier"][0]
-    for row in range(2, ws.max_row + 1):
-        tier = ws.cell(row=row, column=tier_col).value
-        if tier in color_map:
-            fill = PatternFill(start_color=color_map[tier], end_color=color_map[tier], fill_type="solid")
-            for col in range(1, ws.max_column + 1):
-                ws.cell(row=row, column=col).fill = fill
-
-    ev_col = [c.column for c in ws[1] if c.value == "EV ($/1)"][0]
-    rule = ColorScaleRule(
-        start_type="min", start_color="F8696B",
-        mid_type="percentile", mid_value=50, mid_color="FFEB84",
-        end_type="max", end_color="63BE7B"
-    )
-    ws.conditional_formatting.add(
-        f"{ws.cell(2, ev_col).coordinate}:{ws.cell(ws.max_row, ev_col).coordinate}", rule
-    )
-
-    summary = wb.create_sheet("SUMMARY")
-    summary.append(["Metric", "Value"])
-    summary.append(["Timestamp", timestamp])
-    summary.append(["Total Props", len(df_sorted)])
-    summary.append(["Mean EV ($/1)", f"{df_sorted['EV ($/1)'].mean():.4f}"])
-    summary.append(["Mean Model Prob (%)", f"{df_sorted['Model Prob'].mean():.2f}%"])
-    summary.append(["Mean PP EV (%)", f"{df_sorted['EV (PrizePicks)'].mean():.2f}%"])
-
-    for tier in ["ELITE", "SOLID", "FADE", "NEUTRAL"]:
-        summary.append([f"{tier} Count", len(df_sorted[df_sorted['Tier'] == tier])])
-
-    summary.append(["Projected ROI ($1 per prop)", f"${df_sorted['EV ($/1)'].sum():.2f}"])
-
-    for col in ws.columns:
-        max_len = max(len(str(c.value)) if c.value else 0 for c in col)
-        ws.column_dimensions[col[0].column_letter].width = max_len + 3
-
-    wb.save(xlsx_path)
-    print(f"\n✅ Excel dashboard saved: {xlsx_path}")
-
-    try:
-        if platform.system() == "Windows":
-            os.startfile(xlsx_path)
-        elif platform.system() == "Darwin":
-            subprocess.call(["open", xlsx_path])
-        else:
-            subprocess.call(["xdg-open", xlsx_path])
-    except Exception as e:
-        print(f"⚠️ Could not auto-open Excel: {e}")
-
-
-# ===============================
-# BATCH ANALYSIS FUNCTION (single, de-duplicated)
-# ===============================
-def batch_analyze_props(props_list, settings):
-    """Analyze multiple props and return sorted by EV"""
-    results = []
-    total = len(props_list)
-
-    for i, prop in enumerate(props_list, 1):
-        print(f"\n{'='*60}")
-        print(f"Analyzing prop {i}/{total}: {prop['player']} {prop['stat']} {prop['line']}")
-        print(f"{'='*60}")
-
-        try:
-            result = analyze_single_prop(
-                prop['player'], prop['stat'], prop['line'], prop['odds'], settings
-            )
-            if result:
-                results.append(result)
-                print(f"✅ Success - EV: {result['ev']*100:.1f}¢")
-            else:
-                print(f"⚠️ Skipped - No valid data")
-        except Exception as e:
-            print(f"❌ Error analyzing {prop['player']}: {e}")
-            continue
-
-    results.sort(key=lambda x: x['ev'], reverse=True)
-    return results
-
-
-def find_latest_csv():
-    """Find the most recent auto_props_*.csv file"""
-    import glob
-    try:
-        csv_files = glob.glob("auto_props_*.csv")
-        if not csv_files:
-            return None
-
-        csv_files.sort(key=os.path.getmtime, reverse=True)
-        latest = csv_files[0]
-
-        age_hours = (time.time() - os.path.getmtime(latest)) / 3600
-        if age_hours > 24:
-            print(f"⚠️ Latest CSV is {age_hours:.1f} hours old - may be stale")
-
-        return latest
-    except Exception as e:
-        print(f"⚠️ Error finding CSV: {e}")
-        return None
-
-
-def run_csv_batch_mode(csv_path):
-    """Process a CSV file with props in batch mode"""
-    print("🧠 PropPulse+ Model v2025.3 — Batch Mode")
-    print("="*60)
-    print(f"📂 Processing: {csv_path}\n")
-
-    settings = load_settings()
-
-    try:
-        df = pd.read_csv(csv_path)
-        print(f"✅ Loaded {len(df)} props from CSV")
-
-        required = ['player', 'stat', 'line', 'odds']
-        missing = [col for col in required if col not in df.columns]
-
-        if missing:
-            print(f"❌ CSV missing required columns: {missing}")
-            print(f"   Found columns: {list(df.columns)}")
-            return None
-
-        props = df.to_dict('records')
-
-    except Exception as e:
-        print(f"❌ Error reading CSV: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
-
-    print(f"\n⏳ Starting analysis of {len(props)} props...\n")
-    results = batch_analyze_props(props, settings)
-
-    if results:
-        print(f"\n✅ Analysis complete! {len(results)}/{len(props)} props analyzed successfully")
-
-        results_df = pd.DataFrame(results)
-        export_results_to_excel(results_df)
-
-        print("\n📊 Quick Summary:")
-        print(f"   Positive EV props: {len([r for r in results if r['ev'] > 0])}")
-        print(f"   Average EV: {sum(r['ev'] for r in results) / len(results) * 100:.1f}¢")
-        top_ev = max(results, key=lambda x: x['ev'])
-        print(f"   Top EV: {top_ev['player']} ({top_ev['ev']*100:.1f}¢)")
-
-        return results
-    else:
-        print("\n❌ No valid results to export")
-        return None
-
-
-def main(player=None, stat=None, line=None, odds=None, silent=False):
-    """Main entry point with proper CSV auto-detection"""
-    settings = load_settings()
-
-    # Check for CSV argument
-    csv_path = None
-    if len(sys.argv) > 1 and sys.argv[1].endswith('.csv'):
-        csv_path = sys.argv[1]
-        if not os.path.exists(csv_path):
-            print(f"❌ CSV file not found: {csv_path}")
-            return None
-    elif sys.stdin.isatty():
-        csv_path = find_latest_csv()
-        if csv_path:
-            response = input(f"📂 Found recent CSV: {csv_path}\n   Use it for batch analysis? (y/n): ").strip().lower()
-            if response != 'y':
-                csv_path = None
-
-    if csv_path:
-        return run_csv_batch_mode(csv_path)
-
-    # Programmatic/silent mode
-    if player and stat and line is not None and odds is not None:
-        result = analyze_single_prop(player, stat, line, odds, settings)
-        if not result:
-            return {"Player": player, "Output": "No data returned"}
-
-        if silent:
-            return {
-                "Player": player,
-                "Stat": stat,
-                "Line": line,
-                "Odds": odds,
-                "Projection": round(result['projection'], 2),
-                "ModelProb%": f"{result['p_model'] * 100:.2f}%",
-                "BookProb%": f"{result['p_book'] * 100:.2f}%",
-                "EV_per_$1": f"{result['ev'] * 100:.1f}¢",
-                "Edge%": f"{(result['p_model'] - result['p_book']) * 100:.2f}%",
-                "Opponent": result.get('opponent', 'N/A'),
-                "Position": result.get('position', 'N/A'),
-                "DvP": round(result.get('dvp_mult', 1.0), 3),
-                "GamesAnalyzed": result['n_games'],
-                "InjuryStatus": result.get('injury', 'N/A'),
-                "Result": "🟢 OVER Value" if result['projection'] > line else "🔴 UNDER Value"
-            }
-
-        print("\n" + "="*60)
-        print(f"📊 {player} | {stat} Line {line}")
-        print(f"Games Analyzed: {result['n_games']}")
-        print(f"Model Prob:  {result['p_model'] * 100:.1f}%")
-        print(f"Book Prob:   {result['p_book'] * 100:.1f}%")
-        print(f"Model Projection: {result['projection']:.1f} {stat}")
-        print(f"EV: {result['ev'] * 100:.1f}¢ per $1 | {'🔥 Positive' if result['ev'] > 0 else '⚠️ Negative'}")
-        print("🟢 Over Value" if result['projection'] > line else "🔴 Under Value")
-        print("="*60 + "\n")
-        return result
-
-    # Interactive CLI
-    print("🧠 PropPulse+ Model v2025.3 — Player Prop EV Analyzer")
-    print("="*60 + "\n")
-
-    mode = input("Mode: [1] Single Prop or [2] Batch Entry (default=1): ").strip() or "1"
-
-    if mode == "2":
-        print("\n📋 BATCH MODE: Enter props one by one (blank player name when done)")
-        props_list = []
-        while True:
-            print(f"\n--- Prop #{len(props_list) + 1} ---")
-            player = input("Player name (or press Enter to finish): ").strip()
-            if not player:
-                break
-            try:
-                stat = input("Stat (PTS/REB/AST/REB+AST/PRA/FG3M): ").strip().upper()
-                line = float(input("Line: "))
-                odds = int(input("Odds (e.g. -110): "))
-                props_list.append({"player": player, "stat": stat, "line": line, "odds": odds})
-                print(f"✅ Added: {player} {stat} {line} ({odds})")
-            except ValueError as e:
-                print(f"❌ Invalid input: {e}")
-                continue
-
-        if not props_list:
-            print("No props entered. Exiting.")
-            return None
-
-        print(f"\n⏳ Analyzing {len(props_list)} props...")
-        results = batch_analyze_props(props_list, settings)
-        if results:
-            print(f"\n✅ Analysis complete! Found {len(results)} valid props")
-            df = pd.DataFrame(results)
-            export_results_to_excel(df)
-            interactive_display(results)
-        else:
-            print("No valid results to display.")
-        return results
-
-    # Single prop mode
-    player = input("Player name: ").strip()
-    stat = input("Stat (PTS/REB/AST/REB+AST/PRA/FG3M): ").strip().upper()
-    line = float(input("Line: "))
-    odds = int(input("Sportsbook odds (e.g. -110): "))
-    debug_mode = input("Enable debug mode? (y/n, default=n): ").strip().lower() == 'y'
-
-    result = analyze_single_prop(player, stat, line, odds, settings, debug_mode)
-    if not result:
-        print("❌ Analysis failed")
-        return None
-
-    print("\n" + "="*60)
-    print(f"📊 {player} | {stat} Line {line}")
-    print(f"Games Analyzed: {result['n_games']}")
-    print(f"Model Prob:  {result['p_model'] * 100:.1f}%")
-    print(f"Book Prob:   {result['p_book'] * 100:.1f}%")
-    print(f"Model Projection: {result['projection']:.1f} {stat}")
-    print(f"EV: {result['ev'] * 100:.1f}¢ per $1 | {'🔥 Positive' if result['ev'] > 0 else '⚠️ Negative'}")
-    print("🟢 Over Value" if result['projection'] > line else "🔴 Under Value")
-    print("="*60 + "\n")
-
-    return result
-
-
-if __name__ == "__main__":
-    print("🧠 PropPulse+ Model v2025.3 — Player Prop EV Analyzer")
-    print("=" * 60)
-
-    if len(sys.argv) > 1 and sys.argv[1].endswith(".csv"):
-        csv_path = sys.argv[1]
-        if os.path.exists(csv_path):
-            run_csv_batch_mode(csv_path)
-        else:
-            print(f"❌ CSV not found: {csv_path}")
-            sys.exit(1)
-    else:
-        print("\n💡 Entering interactive mode...\n")
-        try:
-            main()
-        except KeyboardInterrupt:
-            print("\n⚠️ Interrupted by user. Exiting...")
-            sys.exit(0)
-        except Exception as e:
-            print(f"\n❌ Fatal error: {e}")
-            import traceback
-            traceback.print_exc()
-            sys.exit(1)
-
 
 
 
