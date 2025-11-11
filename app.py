@@ -486,6 +486,16 @@ if mode == "🎯 Single Prop Analysis":
                         with st.expander("🔧 Debug Log"):
                             st.code(model_output)
                     st.stop()
+            
+            except TypeError as te:
+                st.error(f"❌ Error analyzing prop: Unable to fetch opponent data for {player}")
+                st.warning("⚠️ This usually means the player has no upcoming games or the schedule API is unavailable.")
+                if debug_mode:
+                    with st.expander("🔧 Error Details"):
+                        st.code(str(te))
+                        if 'model_output' in locals():
+                            st.code(model_output)
+                st.stop()
                 
                 # Extract results
                 p_model = result['p_model']
@@ -722,6 +732,8 @@ else:
                 if result:
                     results.append(result)
 
+            except TypeError as te:
+                st.warning(f"⚠️ Skipped {entry['player']}: Unable to fetch opponent data")
             except Exception as e:
                 st.warning(f"⚠️ Skipped {entry['player']}: {str(e)}")
 
