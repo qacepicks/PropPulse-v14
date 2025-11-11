@@ -1264,13 +1264,40 @@ def analyze_single_prop(player, stat, line, odds, settings, debug_mode=False):
 
     # --- Opponent + DvP ---
     try:
-        opp, team_abbr = get_live_opponent_from_schedule(player, settings)
-        if not opp:
-            print(f"[Schedule] ⚠️ Could not determine opponent, using fallback...")
-            opp, team_abbr = get_upcoming_opponent_abbr(player, settings)
-    except Exception as e:
-        print(f"[Schedule] ❌ Opponent detection failed: {e}")
-        opp, team_abbr = get_upcoming_opponent_abbr(player, settings)
+        # --- Opponent + DvP ---
+opp = None
+team_abbr = None
+
+try:
+    result = get_live_opponent_from_schedule(player, settings)
+    if result and isinstance(result, tuple) and len(result) == 2:
+        opp, team_abbr = result
+    elif result:
+        opp = result
+        team_abbr = None
+    
+    if not opp:
+        print(f"[Schedule] ⚠️ Could not determine opponent, using fallback...")
+        opp = get_upcoming_opponent_abbr(player, settings)
+        team_abbr = None
+except TypeError as te:
+    print(f"[Schedule] ⚠️ Type error in opponent detection: {te}")
+    try:
+        opp = get_upcoming_opponent_abbr(player, settings)
+        team_abbr = None
+    except Exception as e2:
+        print(f"[Schedule] ❌ Fallback also failed: {e2}")
+        opp = None
+        team_abbr = None
+except Exception as e:
+    print(f"[Schedule] ❌ Opponent detection failed: {e}")
+    try:
+        opp = get_upcoming_opponent_abbr(player, settings)
+        team_abbr = None
+    except Exception as e2:
+        print(f"[Schedule] ❌ Fallback also failed: {e2}")
+        opp = None
+        team_abbr = None
 
     pos = get_player_position_auto(player, df_logs=df, settings=settings)
     try:
