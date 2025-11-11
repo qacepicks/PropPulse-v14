@@ -473,76 +473,10 @@ def infer_position_from_stats(df_logs, player_name=""):
         return "SG"
 
 # ===============================
-# ✅ FIXED: OPPONENT DETECTION
-# ===============================
-import requests
-from datetime import datetime, timedelta
-
-def get_upcoming_opponent_abbr(player_name, settings=None):
-    """
-    Uses BallDontLie V1 to pull the player's next opponent.
-    If API fails or no game upcoming, returns None safely.
-    """
-    try:
-        # --- Build player lookup ---
-        base_url = "https://www.balldontlie.io/api/v1"
-        player_search = f"{base_url}/players?search={player_name.replace(' ', '%20')}"
-        r = requests.get(player_search, timeout=5)
-        r.raise_for_status()
-        data = r.json().get("data", [])
-
-        if not data:
-            print(f"[Opponent] ⚠️ No player match found for {player_name}")
-            return None
-
-        player_id = data[0]["id"]
-
-        # --- Look ahead 7 days for next game ---
-        today = datetime.utcnow().date()
-        future_date = today + timedelta(days=7)
-        games_url = (
-            f"{base_url}/games?player_ids[]={player_id}"
-            f"&start_date={today}&end_date={future_date}"
-        )
-        g = requests.get(games_url, timeout=5)
-        g.raise_for_status()
-        games = g.json().get("data", [])
-
-        if not games:
-            print(f"[Opponent] ⚠️ No upcoming games found for {player_name}")
-            return None
-
-        # --- Find the nearest upcoming game ---
-        games = sorted(games, key=lambda x: x["date"])
-        next_game = games[0]
-
-        # --- Extract opponent abbreviation ---
-        team_id = next_game["home_team"]["id"]
-        opp_team = (
-            next_game["visitor_team"]
-            if team_id == data[0]["team"]["id"]
-            else next_game["home_team"]
-        )
-
-        opp_abbr = opp_team.get("abbreviation", None)
-        if opp_abbr:
-            print(f"[Opponent] ✅ Found upcoming matchup: {player_name} vs {opp_abbr}")
-            return opp_abbr
-        else:
-            print(f"[Opponent] ⚠️ Missing abbreviation field for {player_name}")
-            return None
-
-    except Exception as e:
-        print(f"[Opponent] ❌ Error fetching opponent for {player_name}: {e}")
-        return None
-
-
-# ===============================
 # ✅ FIXED: OPPONENT DETECTION SYSTEM (v2025.6c)
 # ===============================
 from nba_api.stats.endpoints import scoreboardv2
 from nba_api.stats.static import teams as nba_teams
-from datetime import datetime
 import pandas as pd
 import time
 import traceback
@@ -733,7 +667,6 @@ def get_upcoming_opponent_abbr(player_name, settings=None):
         print(f"[Fallback] ❌ Error: {e}")
         traceback.print_exc()
         return None, None
-
 # ===============================
 # INJURY STATUS
 # ===============================
@@ -1251,56 +1184,69 @@ def get_homeaway_adjustment(player, stat, line, settings):
         return 1.0
 
 def debug_projection(df, stat="PTS", line=20.5, player_name=""):
-    # Build the series safely
-    if stat == "REB+AST":
-        if "REB" in df.columns and "AST" in df.columns:
-            series = pd.to_numeric(df["REB"], errors="coerce").fillna(0) + \
-                     pd.to_numeric(df["AST"], errors="coerce").fillna(0)
+    """Debug helper for PropPulse+ — prints recent and full-season projections safely."""
+    try:
+        # Build the series safely
+        if stat == "REB+AST":
+            if "REB" in df.columns and "AST" in df.columns:
+                series = pd.to_numeric(df["REB"], errors="coerce").fillna(0) + \
+                         pd.to_numeric(df["AST"], errors="coerce").fillna(0)
+            else:
+                print("[Debug] ⚠️ Missing REB or AST for REB+AST view")
+                return
+        elif stat == "PRA":
+            need = {"PTS", "REB", "AST"}
+            if need.issubset(df.columns):
+                series = (pd.to_numeric(df["PTS"], errors="coerce").fillna(0) +
+                          pd.to_numeric(df["REB"], errors="coerce").fillna(0) +
+                          pd.to_numeric(df["AST"], errors="coerce").fillna(0))
+            else:
+                print("[Debug] ⚠️ Missing one of PTS/REB/AST for PRA view")
+                return
         else:
-            print("[Debug] ⚠️ Missing REB or AST for REB+AST view"); return
-    elif stat == "PRA":
-        need = {"PTS","REB","AST"}
-        if need.issubset(df.columns):
-            series = (pd.to_numeric(df["PTS"], errors="coerce").fillna(0) +
-                      pd.to_numeric(df["REB"], errors="coerce").fillna(0) +
-                      pd.to_numeric(df["AST"], errors="coerce").fillna(0))
-        else:
-            print("[Debug] ⚠️ Missing one of PTS/REB/AST for PRA view"); return
-    else:
-        if stat not in df.columns:
-            print(f"[Debug] ⚠️ Missing {stat}"); return
-        series = pd.to_numeric(df[stat], errors="coerce").fillna(0)
-
-    vals = series.values.astype(float)
-    if len(vals) == 0:
-        print("[Debug] ⚠️ No valid rows"); return
-
-    import numpy as np
-    season_mean = float(np.mean(vals))
-    season_med  = float(np.median(vals))
-    season_std  = float(np.std(vals, ddof=0))
-    over_count  = int(np.sum(vals > float(line)))
-    n           = int(len(vals))
-    last20      = vals[-20:] if n >= 20 else vals
-    l20_mean    = float(np.mean(last20))
-    l20_med     = float(np.median(last20))
-
-    print("\n" + "="*60)
-    print(f"🔍 DEBUG: {player_name} {stat} Projection Analysis")
-    print("="*60)
-    print(f"\n📊 Full Season Stats ({n} games):")
-    print(f"   Mean: {season_mean:.2f}")
-    print(f"   Median: {season_med:.2f}")
-    print(f"   Std Dev: {season_std:.2f}")
-    print(f"   Min: {vals.min():.1f} | Max: {vals.max():.1f}")
-    print(f"\n📈 Last 20 Games:")
-    print(f"   Mean: {l20_mean:.2f}")
-    print(f"   Median: {l20_med:.2f}")
-    print(f"   Difference from season: {l20_mean - season_mean:+.2f}")
-    print(f"\n🎯 Historical Performance vs Line {line}:")
-    print(f"   Over: {over_count}/{n} ({over_count/n*100:.1f}%)")
-    print(f"   Under: {n-over_count}/{n} ({(1-over_count/n)*100:.1f}%)")
-    print("="*60 + "\n")
+            if stat not in df.columns:
+                print(f"[Debug] ⚠️ Missing {stat}")
+                return
+            series = pd.to_numeric(df[stat], errors="coerce").fillna(0)
+        
+        vals = series.values.astype(float)
+        if len(vals) == 0:
+            print("[Debug] ⚠️ No valid rows")
+            return
+        
+        import numpy as np
+        season_mean = float(np.mean(vals))
+        season_med = float(np.median(vals))
+        season_std = float(np.std(vals, ddof=0))
+        over_count = int(np.sum(vals > float(line)))
+        n = int(len(vals))
+        last20 = vals[-20:] if n >= 20 else vals
+        l20_mean = float(np.mean(last20))
+        l20_med = float(np.median(last20))
+        
+        # Print the debug output
+        print("\n" + "=" * 60)
+        print(f"🔍 DEBUG: {player_name} {stat} Projection Analysis")
+        print("=" * 60)
+        print(f"\n📊 Full Season Stats ({n} games):")
+        print(f"   Mean: {season_mean:.2f}")
+        print(f"   Median: {season_med:.2f}")
+        print(f"   Std Dev: {season_std:.2f}")
+        print(f"   Min: {vals.min():.1f} | Max: {vals.max():.1f}")
+        print(f"\n📈 Last 20 Games:")
+        print(f"   Mean: {l20_mean:.2f}")
+        print(f"   Median: {l20_med:.2f}")
+        print(f"   Difference from season: {l20_mean - season_mean:+.2f}")
+        print(f"\n🎯 Historical Performance vs Line {line}:")
+        print(f"   Over: {over_count}/{n} ({over_count/n*100:.1f}%)")
+        print(f"   Under: {n-over_count}/{n} ({(1-over_count/n)*100:.1f}%)")
+        print("=" * 60 + "\n")
+        
+    except Exception as e:
+        print(f"[Debug] ⚠️ Skipped debug projection: {e}")
+        import traceback
+        traceback.print_exc()
+        
     # ===============================
     # 📈 Recency-Weighted Projection — v2025.3a
     # ===============================
@@ -1326,11 +1272,11 @@ def debug_projection(df, stat="PTS", line=20.5, player_name=""):
         print(f"[Projection] ⚠️ Recency weighting failed: {e}")
         proj_stat = mean * context_mult
 
-# ===============================
-# ✅ ANALYZE SINGLE PROP — PropPulse+ v2025.3a (Accuracy-Calibrated Edition)
+## ===============================
+# ✅ ANALYZE SINGLE PROP — PropPulse+ v2025.3b (Universal Sanity-Calibrated Edition)
 # ===============================
 def analyze_single_prop(player, stat, line, odds, settings, debug_mode=False):
-    """Analyze a single prop and return results dict - fully tuned version"""
+    """Analyze a single prop and return results dict - fully tuned + sanity-stabilized version"""
     import os, time, numpy as np, pandas as pd
     from scipy.stats import norm
 
@@ -1340,10 +1286,14 @@ def analyze_single_prop(player, stat, line, odds, settings, debug_mode=False):
     if need_refresh:
         print(f"[Data] ⏳ Refreshing logs for {player}...")
         try:
-            df = fetch_player_logs(player, save_dir=settings["data_path"], settings=settings)
+            df = fetch_player_data(player, settings=settings)
         except Exception as e:
             print(f"[BDL] ⚠️ BallDon'tLie failed: {e}")
-            df = fetch_player_logs(player, save_dir=settings["data_path"], settings=settings, include_last_season=True)
+            try:
+                df = fetch_player_data(player, settings=settings, include_last_season=True)
+            except Exception as e2:
+                print(f"[Backup] ❌ Could not fetch any logs: {e2}")
+                return None
         if df is None or len(df) == 0:
             print(f"[Logs] ❌ Could not fetch logs for {player}")
             return None
@@ -1375,10 +1325,30 @@ def analyze_single_prop(player, stat, line, odds, settings, debug_mode=False):
             return None
         vals = df[stat_col].astype(float)
 
-    mean = vals.mean()
-    std = vals.std() if len(vals) > 1 else 0.0
+    # --- Core stats ---
+    season_mean = vals.mean()
+    std = vals.std() if len(vals) > 1 else 1.0
+    mean_l10 = vals.tail(10).mean() if len(vals) >= 10 else season_mean
+    mean_l20 = vals.tail(20).mean() if len(vals) >= 20 else season_mean
+
+    # --- START WITH SEASON BASELINE (not recent form!) ---
+    recent_trend = (mean_l10 + mean_l20) / 2
+    trend_weight = 0.15
+    base_projection = (1 - trend_weight) * season_mean + trend_weight * recent_trend
+    print(f"[Projection] Season={season_mean:.2f}, Recent trend={recent_trend:.2f} → base={base_projection:.2f}")
+
+    # --- Minutes adjustment ---
+    if "MIN" in df.columns:
+        season_mins = df["MIN"].mean()
+        l10_mins = df["MIN"].tail(10).mean() if len(df) >= 10 else season_mins
+        mins_ratio = l10_mins / season_mins if season_mins > 0 else 1.0
+        if abs(mins_ratio - 1.0) > 0.10:
+            print(f"[Minutes] Season={season_mins:.1f}, L10={l10_mins:.1f} → ratio={mins_ratio:.3f}")
+            base_projection *= mins_ratio
+
+    # --- Probability calculations for EV model ---
     p_emp = np.mean(vals > line)
-    p_norm = 1 - norm.cdf(line, mean, std if std > 0 else 1)
+    p_norm = 1 - norm.cdf(line, season_mean, std if std > 0 else 1)
     p_base = 0.6 * p_norm + 0.4 * p_emp
 
     # --- Contextual factors ---
@@ -1400,24 +1370,13 @@ def analyze_single_prop(player, stat, line, odds, settings, debug_mode=False):
             print(f"[Schedule] ⚠️ Could not determine opponent, using fallback...")
             opp = get_upcoming_opponent_abbr(player, settings)
             team_abbr = None
-    except TypeError as te:
-        print(f"[Schedule] ⚠️ Type error in opponent detection: {te}")
-        try:
-            opp = get_upcoming_opponent_abbr(player, settings)
-            team_abbr = None
-        except Exception as e2:
-            print(f"[Schedule] ❌ Fallback also failed: {e2}")
-            opp = None
-            team_abbr = None
     except Exception as e:
         print(f"[Schedule] ❌ Opponent detection failed: {e}")
         try:
             opp = get_upcoming_opponent_abbr(player, settings)
-            team_abbr = None
         except Exception as e2:
             print(f"[Schedule] ❌ Fallback also failed: {e2}")
             opp = None
-            team_abbr = None
 
     pos = get_player_position_auto(player, df_logs=df, settings=settings)
     try:
@@ -1429,24 +1388,22 @@ def analyze_single_prop(player, stat, line, odds, settings, debug_mode=False):
     # --- Probability stacking ---
     n_games = len(df)
     maturity = min(1.0, n_games / 40)
-    w_base, w_l10, w_ha, w_dvp, w_usage = (
-        0.30 + 0.2 * maturity,
-        0.20 - 0.07 * maturity,
-        0.10,
-        0.15 + 0.02 * maturity,
-        0.20 - 0.05 * maturity,
-    )
-    total = sum((w_base, w_l10, w_ha, w_dvp, w_usage))
-    w_base, w_l10, w_ha, w_dvp, w_usage = [w / total for w in (w_base, w_l10, w_ha, w_dvp, w_usage)]
+    w_base = 0.40 + 0.15 * maturity
+    w_l10 = 0.10 - 0.03 * maturity
+    w_ha = 0.10
+    w_dvp = 0.25 + 0.05 * maturity
+    w_usage = 0.15 - 0.02 * maturity
+    total = sum([w_base, w_l10, w_ha, w_dvp, w_usage])
+    w_base, w_l10, w_ha, w_dvp, w_usage = [w / total for w in [w_base, w_l10, w_ha, w_dvp, w_usage]]
 
     p_dvp = p_base * dvp_mult
     p_model = (p_base * w_base + p_l10 * w_l10 + p_ha * w_ha + p_dvp * w_dvp + p_usage * w_usage)
 
     # --- Confidence system ---
-    base_conf = 1 - (std / mean) if mean > 0 else 0.5
+    base_conf = 1 - (std / season_mean) if season_mean > 0 else 0.5
     confidence = max(0.1, base_conf * maturity)
-    if std > 0 and mean > 0:
-        volatility_score = max(0.1, min(1.0, 1 - (std / mean)))
+    if std > 0 and season_mean > 0:
+        volatility_score = max(0.1, min(1.0, 1 - (std / season_mean)))
         confidence *= 0.7 + 0.3 * volatility_score
     if stat.upper() in ["REB", "AST"]:
         confidence *= 1.05
@@ -1454,37 +1411,45 @@ def analyze_single_prop(player, stat, line, odds, settings, debug_mode=False):
         confidence *= 0.95
     confidence = max(0.1, min(0.99, confidence))
 
+    # --- Context multipliers ---
+    inj = get_injury_status(player, settings.get("injury_api_key"))
+    team_total = get_team_total(player, settings)
+    rest_days = get_rest_days(player, settings)
+    team_mult = min(1.20, max(0.85, (team_total / 112) if team_total else 1.0))
+    rest_mult = {0: 0.96, 1: 1.00, 2: 1.03}.get(rest_days, 1.05)
+    dvp_mult_adjusted = max(0.80, min(1.25, dvp_mult))
+    context_mult = dvp_mult_adjusted * team_mult * rest_mult
+    print(f"[Context] DvP={dvp_mult_adjusted:.3f} × Team={team_mult:.3f} × Rest={rest_mult:.3f} = {context_mult:.3f}")
+
+    # --- Apply context to projection ---
+    projection = base_projection * context_mult
+
+    # --- Sanity check ---
+    line_trust = 0.25
+    deviation_ratio = projection / line if line > 0 else 1.0
+    if deviation_ratio < 0.65:
+        print(f"[Sanity] ⚠️ Projection too low ({projection:.1f} vs {line}) — blending 25% with line")
+        projection = (1 - line_trust) * projection + line_trust * line
+    elif deviation_ratio > 1.35:
+        print(f"[Sanity] ⚠️ Projection too high ({projection:.1f} vs {line}) — blending 25% with line")
+        projection = (1 - line_trust) * projection + line_trust * line
+
+    proj_stat = projection
+    print(f"[Final] Projection={proj_stat:.2f} (base={base_projection:.2f} × context={context_mult:.3f})")
+
+    # --- Deviation alert ---
+    deviation_pct = abs(proj_stat - line) / line * 100 if line > 0 else 0
+    if deviation_pct > 25:
+        print(f"[⚠️ ALERT] Projection deviates {deviation_pct:.1f}% from line!")
+        print(f"   → Model: {proj_stat:.1f} | Line: {line}")
+        print(f"   → This suggests missing context (injury news, role change, or vegas insider info)")
+        confidence *= 0.70
+
     # --- Probability & EV ---
     p_model = max(0.05, min(p_model * (0.5 + 0.5 * confidence), 0.95))
     p_book = american_to_prob(odds)
     ev_raw = ev_sportsbook(p_model, odds)
     ev = ev_raw * (0.5 + 0.5 * confidence)
-
-    # --- Context multipliers ---
-    inj = get_injury_status(player, settings.get("injury_api_key"))
-    team_total = get_team_total(player, settings)
-    rest_days = get_rest_days(player, settings)
-    team_mult = min(1.10, max(0.90, (team_total / 112) if team_total else 1.0))
-    rest_mult = {0: 0.96, 1: 1.00, 2: 1.03}.get(rest_days, 1.05)
-    dvp_mult = max(0.85, min(1.15, dvp_mult))
-    context_mult = dvp_mult * team_mult * rest_mult
-
-    # --- Projection ---
-    try:
-        if len(df) >= 10:
-            mean_l10 = df[stat_col].astype(float).tail(10).mean()
-        else:
-            mean_l10 = mean
-        if len(df) >= 20:
-            mean_l20 = df[stat_col].astype(float).tail(20).mean()
-        else:
-            mean_l20 = mean_l10
-        weighted_proj = (0.6 * mean_l10) + (0.4 * mean_l20)
-        proj_stat = weighted_proj * context_mult
-        print(f"[Projection] L10={mean_l10:.2f}, L20={mean_l20:.2f}, Weighted={weighted_proj:.2f} → proj={proj_stat:.2f}")
-    except Exception as e:
-        print(f"[Projection] ⚠️ Recency weighting failed: {e}")
-        proj_stat = mean * context_mult
 
     # --- EV grading ---
     ev_cents = ev * 100
@@ -1500,14 +1465,13 @@ def analyze_single_prop(player, stat, line, odds, settings, debug_mode=False):
 
     print(f"[EV] {player}: EV¢={ev_cents:+.2f} | Conf={confidence:.2f} | Score={ev_score:.2f} → {grade}")
 
-    # ✅ Safe debug call inside function
     if debug_mode:
         try:
             debug_projection(df, stat=stat, line=line, player_name=player)
         except Exception as e:
             print(f"[Debug] ⚠️ Skipped debug projection: {e}")
 
-    # --- Return structured result ---
+    # --- Final output ---
     direction = "Higher" if proj_stat > line else "Lower"
     result_symbol = "⚠️" if abs(proj_stat - line) < 0.5 else "✓" if direction == "Higher" else "✗"
 
@@ -1530,145 +1494,6 @@ def analyze_single_prop(player, stat, line, odds, settings, debug_mode=False):
         "result": result_symbol,
         "direction": direction
     }
-
- 
-    # --- Confidence weighting ---
-    base_conf = 1 - (std / mean) if mean > 0 else 0.5
-    confidence = max(0.1, base_conf * maturity)
-
-    # ===============================
-    # 🎯 Confidence & Volatility Calibration — v2025.3a
-    # ===============================
-    # Volatility-based confidence boost (more stable = more trust)
-    if std > 0 and mean > 0:
-        volatility_score = max(0.1, min(1.0, 1 - (std / mean)))  # inverse volatility
-        confidence *= 0.7 + 0.3 * volatility_score  # up to +30% boost for stable props
-
-    # Stat-type reliability weighting
-    if stat.upper() in ["REB", "AST"]:
-        confidence *= 1.05   # more stable stats
-    elif stat.upper() in ["PTS", "PRA"]:
-        confidence *= 0.95   # slightly less reliable
-
-    # Clamp confidence to a sane range
-    confidence = max(0.1, min(0.99, confidence))
-
-    # Trend/matchup synergy
-    trend_strength = abs(p_l10 - 0.5) * 2
-    matchup_strength = abs(dvp_mult - 1.0) / 0.15
-
-    if (p_l10 > 0.5 and dvp_mult > 1.0) or (p_l10 < 0.5 and dvp_mult < 1.0):
-        synergy = min(1.0, (trend_strength + matchup_strength) / 2)
-        confidence = min(confidence * (1.03 + 0.05 * synergy), 1.0)
-    elif (p_l10 > 0.55 and dvp_mult < 0.97) or (p_l10 < 0.45 and dvp_mult > 1.03):
-        conflict = min(1.0, (trend_strength + matchup_strength) / 2)
-        confidence *= (1.00 - 0.05 * conflict)
-
-    # Apply confidence to probability model (soft shrink)
-    p_model = max(0.05, min(p_model * (0.5 + 0.5 * confidence), 0.95))
-
-    # Book prob + raw EV from adjusted model prob
-    p_book = american_to_prob(odds)
-    ev_raw = ev_sportsbook(p_model, odds)
-
-    # Weak-signal penalty AFTER we have ev_raw
-    if confidence < 0.55 or ev_raw < 0.12:
-        confidence *= 0.85
-        ev_raw *= 0.85
-        print(f"[Filter] ⚠️ Low confidence or EV → reducing weight ({player})")
-
-    # Final EV (confidence-weighted)
-    ev = ev_raw * (0.5 + 0.5 * confidence)
-
-    # ===============================
-    # Projection context multipliers (team/rest/dvp clamp)
-    # ===============================
-    inj = get_injury_status(player, settings.get("injury_api_key"))
-    team_total = get_team_total(player, settings)
-    rest_days = get_rest_days(player, settings)
-    team_mult = min(1.10, max(0.90, (team_total / 112) if team_total else 1.0))
-    rest_mult = {0: 0.96, 1: 1.00, 2: 1.03}.get(rest_days, 1.05)
-    dvp_mult = max(0.85, min(1.15, dvp_mult))  # post-clamp after calibration in get_dvp_multiplier
-    context_mult = dvp_mult * team_mult * rest_mult
-    proj_stat = mean * context_mult
-
-    # --- EV grading (using tuned config) ---
-    ev_pct = ev * 100
-    gap_abs = abs(proj_stat - line)
-    grade = grade_prop(ev_pct, confidence, gap_abs, dvp_mult)
-    print(f"[EV] {player}: EV%={ev_pct:.2f}% | Conf={confidence:.2f} | Gap={gap_abs:.2f} → {grade}")
-
-
-
-    if debug_mode:
-        debug_projection(df, stat=stat, line=line, player_name=player)
-def debug_projection(df, stat, line, player_name):
-    """
-    Debug helper for PropPulse+ — prints recent and full-season projections safely.
-    Fixes undefined 'stat_col' and 'mean' variables.
-    """
-    try:
-        stat_col = stat.upper()
-        # Normalize aliases
-        mapping = {
-            "PTS": "PTS",
-            "REB": "REB",
-            "AST": "AST",
-            "PRA": "PTS+REB+AST",
-            "REB+AST": "REB+AST",
-            "FG3M": "FG3M"
-        }
-        stat_col = mapping.get(stat_col, stat_col)
-
-        # If PRA or REB+AST, create computed columns
-        if stat_col == "PRA" and "PRA" not in df.columns:
-            df["PRA"] = df["PTS"] + df["REB"] + df["AST"]
-        elif stat_col == "REB+AST" and "REB+AST" not in df.columns:
-            df["REB+AST"] = df["REB"] + df["AST"]
-
-        if stat_col not in df.columns:
-            print(f"[Debug] ⚠️ Column not found for {stat_col} in {player_name}")
-            return
-
-        # --- Core stats
-        mean = df[stat_col].astype(float).mean()
-        median = df[stat_col].astype(float).median()
-        std = df[stat_col].astype(float).std()
-        l10_mean = df[stat_col].astype(float).tail(10).mean()
-        l20_mean = df[stat_col].astype(float).tail(20).mean()
-        weighted_proj = (0.65 * l10_mean + 0.35 * l20_mean)
-
-        # --- Print results
-        print("\n============================================================")
-        print(f"🔍 DEBUG: {player_name} {stat_col} Projection Analysis")
-        print("============================================================")
-        print(f"\n📊 Full Season Stats ({len(df)} games):")
-        print(f"   Mean: {mean:.2f}")
-        print(f"   Median: {median:.2f}")
-        print(f"   Std Dev: {std:.2f}")
-        print(f"   Min: {df[stat_col].min()} | Max: {df[stat_col].max()}")
-        print("\n📈 Last 20 Games:")
-        print(f"   Mean: {l20_mean:.2f}")
-        print(f"   Median: {df[stat_col].astype(float).tail(20).median():.2f}")
-        print(f"   Difference from season: {l20_mean - mean:+.2f}")
-        print(f"\n🎯 Historical Performance vs Line {line}:")
-        over = (df[stat_col] > float(line)).sum()
-        under = (df[stat_col] <= float(line)).sum()
-        pct_over = over / len(df) * 100
-        print(f"   Over: {over}/{len(df)} ({pct_over:.1f}%)")
-        print(f"   Under: {under}/{len(df)} ({100 - pct_over:.1f}%)")
-        print("============================================================\n")
-
-        return {
-            "stat_col": stat_col,
-            "mean": mean,
-            "weighted_proj": weighted_proj
-        }
-
-    except Exception as e:
-        print(f"[Debug] ⚠️ Skipped debug projection: {e}")
-        return None
-
 # ================================================
 # 🎯 GRADING LOGIC (using tuned config)
 # ================================================
