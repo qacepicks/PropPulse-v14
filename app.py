@@ -401,7 +401,7 @@ with st.sidebar:
     st.markdown("---")
     
     if mode == "🎯 Single Prop Analysis":
-        debug_mode = st.checkbox("🔧 Enable Debug Mode", value=False)
+        debug_mode = st.checkbox("🔧 Enable Debug Mode", value=True)
     else:
         debug_mode = False
     
