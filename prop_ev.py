@@ -1469,34 +1469,57 @@ def analyze_single_prop(player, stat, line, odds, settings, debug_mode=False):
     print(f"[EV] {player}: EV¢={ev_cents:+.2f} | Conf={confidence:.2f} | Score={ev_score:.2f} → {grade}")
 
     if debug_mode:
-        try:
-            debug_projection(df, stat=stat, line=line, player_name=player)
-        except Exception as e:
-            print(f"[Debug] ⚠️ Skipped debug projection: {e}")
+    try:
+        debug_projection(df, stat=stat, line=line, player_name=player)
+    except Exception as e:
+        print(f"[Debug] ⚠️ Skipped debug projection: {e}")
 
-    # --- Final output ---
-    direction = "Higher" if proj_stat > line else "Lower"
-    result_symbol = "⚠️" if abs(proj_stat - line) < 0.5 else "✓" if direction == "Higher" else "✗"
+# ================================================
+# 🎯 APPLY GRADING LOGIC (using tuned config)
+# ================================================
+try:
+    ev_pct = (p_model - p_book) * 100
+    gap_abs = abs(proj_stat - line)
+    grade = grade_prop(ev_pct, confidence, gap_abs, dvp_mult)
+except Exception as e:
+    print(f"[Grading] ⚠️ Failed to apply grading logic: {e}")
+    grade = "NEUTRAL"
 
-    return {
-        "player": player,
-        "stat": stat,
-        "line": line,
-        "odds": odds,
-        "opponent": opp or "N/A",
-        "position": pos or "N/A",
-        "n_games": n_games,
-        "p_model": p_model,
-        "p_book": p_book,
-        "projection": round(proj_stat, 2),
-        "ev": ev,
-        "dvp_mult": round(dvp_mult, 3),
-        "injury": inj,
-        "confidence": round(confidence, 2),
-        "grade": grade,
-        "result": result_symbol,
-        "direction": direction
-    }
+# --- Final output ---
+direction = "Higher" if proj_stat > line else "Lower"
+result_symbol = "⚠️" if abs(proj_stat - line) < 0.5 else "✓" if direction == "Higher" else "✗"
+
+# Clean fallback values to prevent UI crashes
+try:
+    projection_val = float(proj_stat)
+except Exception:
+    projection_val = 0.0
+
+try:
+    ev_val = float(ev)
+except Exception:
+    ev_val = 0.0
+
+return {
+    "player": player,
+    "stat": stat,
+    "line": float(line),
+    "odds": int(odds),
+    "projection": round(projection_val, 2),
+    "p_model": float(p_model),
+    "p_book": float(p_book),
+    "ev": ev_val,
+    "n_games": int(n_games),
+    "confidence": float(confidence),
+    "grade": str(grade),
+    "opponent": opp or "N/A",
+    "position": pos or "N/A",
+    "dvp_mult": round(float(dvp_mult), 3),
+    "injury": inj or "N/A",
+    "direction": direction,
+    "result": result_symbol
+}
+
 # ================================================
 # 🎯 GRADING LOGIC (using tuned config)
 # ================================================
@@ -1541,9 +1564,6 @@ def grade_prop(ev_pct, conf, gap_abs, dvp):
 
     return "NEUTRAL"
 
-# ===============================
-# 🔁 Batch Analyzer (for Auto Mode)
-# ===============================
 def batch_analyze_props(props_list, settings):
     """
     Runs analyze_single_prop() for a list of player props.
