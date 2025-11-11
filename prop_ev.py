@@ -1489,7 +1489,7 @@ except Exception as e:
 direction = "Higher" if proj_stat > line else "Lower"
 result_symbol = "⚠️" if abs(proj_stat - line) < 0.5 else "✓" if direction == "Higher" else "✗"
 
-# Clean fallback values to prevent UI crashes
+# Clean fallback values
 try:
     projection_val = float(proj_stat)
 except Exception:
