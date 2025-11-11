@@ -1519,10 +1519,11 @@ return {
     "direction": direction,
     "result": result_symbol
 }
-
 # ================================================
 # 🎯 GRADING LOGIC (using tuned config)
 # ================================================
+def grade_prop(ev_pct, conf, gap_abs, dvp):
+
 def grade_prop(ev_pct, conf, gap_abs, dvp):
     """
     Apply tuned rules from calibration to classify each prop.
