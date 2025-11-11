@@ -21,6 +21,25 @@ import platform
 import subprocess
 import sys
 print("DEBUG: stdin.isatty() =", sys.stdin.isatty())
+# ================================================
+# ⚙️ LOAD TUNED CONFIG (auto from JSON)
+# ================================================
+import json, os
+
+def load_tuned_config(path="proppulse_config_20251111_093255.json"):
+    """
+    Loads the tuned PropPulse+ configuration generated from calibration.
+    You can replace the filename with the latest generated config.
+    """
+    if not os.path.exists(path):
+        print(f"[Config] ⚠️ File not found: {path}")
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        cfg = json.load(f)
+    print(f"[Config] ✅ Loaded tuned parameters from {path}")
+    return cfg
+
+CONFIG_TUNED = load_tuned_config()
 
 # ===============================
 # ENHANCED DISPLAY SYSTEM
@@ -416,182 +435,144 @@ def infer_position_from_stats(df_logs, player_name=""):
 # ===============================
 # ✅ FIXED: OPPONENT DETECTION
 # ===============================
+import requests
+from datetime import datetime, timedelta
+
 def get_upcoming_opponent_abbr(player_name, settings=None):
-    """Uses BallDontLie V1 to pull the player's next opponent - FIXED VERSION"""
-    
-    # ✅ FIX: Ensure settings exists
-    if settings is None:
-        settings = {"balldontlie_api_key": "free"}
-    
+    """
+    Uses BallDontLie V1 to pull the player's next opponent.
+    If API fails or no game upcoming, returns None safely.
+    """
     try:
-        print(f"[Schedule] 🔍 Looking up next game for {player_name}...")
-        
-        last_name = player_name.split()[-1]
-        print(f"[Schedule] Searching by last name: '{last_name}'")
-        
-        player_data = get_bdl("/players", {"search": last_name}, settings)
-        
-        if not player_data or "data" not in player_data or not player_data["data"]:
-            print(f"[Schedule] ⚠️ Player not found via API")
-            return None, None
-        
-        player = None
-        for p in player_data["data"]:
-            full_name = f"{p.get('first_name', '')} {p.get('last_name', '')}".strip()
-            if full_name.lower() == player_name.lower():
-                player = p
-                print(f"[Schedule] ✅ Found exact match: {full_name}")
-                break
-        
-        if not player:
-            player = player_data["data"][0]
-            fallback_name = f"{player.get('first_name', '')} {player.get('last_name', '')}"
-            print(f"[Schedule] Using first result: {fallback_name}")
-        
-        team = player.get("team", {})
-        team_id = team.get("id")
-        team_abbr = team.get("abbreviation", "UNK")
-        
-        if not team_id:
-            print("[Schedule] ⚠️ No team ID found")
-            return None, None
-        
-        print(f"[Schedule] Player team: {team_abbr} (ID: {team_id})")
-        
-        today = datetime.now(timezone.utc)
-        season = today.year if today.month >= 10 else today.year - 1
-        
-        games_data = get_bdl("/games", {
-            "seasons[]": season,
-            "team_ids[]": team_id,
-            "per_page": 100
-        }, settings)
-        
-        if not games_data or "data" not in games_data:
-            print("[Schedule] ⚠️ No games data returned")
-            return None, None
-        
-        games = games_data["data"]
-        print(f"[Schedule] Found {len(games)} games for season {season}")
-        
-        today_date = today.date()
-        future_games = []
-        
-        for game in games:
-            try:
-                game_date_str = game.get("date", "")
-                game_date = datetime.fromisoformat(game_date_str.replace("Z", "+00:00")).date()
-                
-                if game_date >= today_date:
-                    future_games.append((game_date, game))
-            except Exception:
-                continue
-        
-        if not future_games:
-            print("[Schedule] ⚠️ No upcoming games found")
-            return None, None
-        
-        future_games.sort(key=lambda x: x[0])
-        next_game_date, next_game = future_games[0]
-        
-        home_team = next_game.get("home_team", {})
-        visitor_team = next_game.get("visitor_team", {})
-        
-        if home_team.get("id") == team_id:
-            opp_abbr = visitor_team.get("abbreviation")
-            location = "vs"
-        else:
-            opp_abbr = home_team.get("abbreviation")
-            location = "@"
-        
+        # --- Build player lookup ---
+        base_url = "https://www.balldontlie.io/api/v1"
+        player_search = f"{base_url}/players?search={player_name.replace(' ', '%20')}"
+        r = requests.get(player_search, timeout=5)
+        r.raise_for_status()
+        data = r.json().get("data", [])
+
+        if not data:
+            print(f"[Opponent] ⚠️ No player match found for {player_name}")
+            return None
+
+        player_id = data[0]["id"]
+
+        # --- Look ahead 7 days for next game ---
+        today = datetime.utcnow().date()
+        future_date = today + timedelta(days=7)
+        games_url = (
+            f"{base_url}/games?player_ids[]={player_id}"
+            f"&start_date={today}&end_date={future_date}"
+        )
+        g = requests.get(games_url, timeout=5)
+        g.raise_for_status()
+        games = g.json().get("data", [])
+
+        if not games:
+            print(f"[Opponent] ⚠️ No upcoming games found for {player_name}")
+            return None
+
+        # --- Find the nearest upcoming game ---
+        games = sorted(games, key=lambda x: x["date"])
+        next_game = games[0]
+
+        # --- Extract opponent abbreviation ---
+        team_id = next_game["home_team"]["id"]
+        opp_team = (
+            next_game["visitor_team"]
+            if team_id == data[0]["team"]["id"]
+            else next_game["home_team"]
+        )
+
+        opp_abbr = opp_team.get("abbreviation", None)
         if opp_abbr:
-            print(f"[Schedule] ✅ Next game: {next_game_date} {location} {opp_abbr}")
-            return opp_abbr, team_abbr
-        
-        return None, None
-        
+            print(f"[Opponent] ✅ Found upcoming matchup: {player_name} vs {opp_abbr}")
+            return opp_abbr
+        else:
+            print(f"[Opponent] ⚠️ Missing abbreviation field for {player_name}")
+            return None
+
     except Exception as e:
-        print(f"[Schedule] ⚠️ Error: {e}")
-        import traceback
-        traceback.print_exc()
-        return None, None
+        print(f"[Opponent] ❌ Error fetching opponent for {player_name}: {e}")
+        return None
+
 
 # ===============================
-# ✅ FIXED: get_live_opponent_from_schedule
+# ✅ FIXED: get_live_opponent_from_schedule (v2025.6b — Final Clean Version)
 # ===============================
+from nba_api.stats.endpoints import scoreboardv2, teaminfocommon
+from datetime import datetime
+import pandas as pd, os, time, traceback
+
 def get_live_opponent_from_schedule(player, settings=None):
     """
-    ✅ FIXED VERSION - Resilient opponent finder
-    Uses game_header (team IDs) + static teams to resolve abbreviations.
+    ✅ PropPulse+ 2025.6b — Reliable opponent detection
+    Uses NBA API scoreboard to map player's team to today's matchup.
+    Falls back to next opponent if no game today.
     """
     try:
-        from nba_api.stats.static import teams as nba_teams
-        import pandas as pd
-        import os
-        from datetime import datetime
-        
-        # ✅ FIX: Ensure settings exists
-        if settings is None:
-            settings = {"data_path": "data"}
-        
         today = datetime.now().strftime("%Y-%m-%d")
-        
-        # Step 1: Get player's team from local CSV
+        board = scoreboardv2.ScoreboardV2(game_date=today)
+        game_header = board.game_header.get_data_frame()
+
+        if game_header.empty:
+            print(f"[Schedule] ℹ️ No NBA games today — checking next opponent...")
+            return get_upcoming_opponent_abbr(player, settings)
+
+        # --- Build mapping of team IDs → abbreviations
+        all_teams = teaminfocommon.TeamInfoCommon(season=datetime.now().year).get_data_frames()[0]
+        id_map = dict(zip(all_teams["TEAM_ID"], all_teams["TEAM_ABBREVIATION"]))
+
+        # --- Load player's team abbreviation from local logs
         path = os.path.join(settings.get("data_path", "data"), f"{player.replace(' ', '_')}.csv")
-        
         if not os.path.exists(path):
-            print(f"[Schedule] ⚠️ No local logs for {player}")
-            return get_upcoming_opponent_abbr(player, settings)
-        
+            print(f"[Schedule] ⚠️ No local logs found for {player}.")
+            return None, None
+
         df = pd.read_csv(path)
-        
-        team_abbr = None
-        if "TEAM_ABBREVIATION" in df.columns:
-            team_abbr = df["TEAM_ABBREVIATION"].mode()[0] if len(df) > 0 else None
-        
-        if not team_abbr:
-            print(f"[Schedule] ⚠️ No team found in logs for {player}")
-            return get_upcoming_opponent_abbr(player, settings)
-        
-        # Step 2: Check today's scoreboard
-        try:
-            board = scoreboardv2.ScoreboardV2(game_date=today)
-            game_header = board.game_header.get_data_frame()
-            
-            if not game_header.empty:
-                # ✅ FIX: Use static teams instead of CommonTeamRoster
-                all_nba_teams = nba_teams.get_teams()
-                id_to_abbr = {t["id"]: t["abbreviation"] for t in all_nba_teams}
-                abbr_to_id = {t["abbreviation"]: t["id"] for t in all_nba_teams}
-                
-                team_id = abbr_to_id.get(team_abbr)
-                
-                if team_id:
-                    for _, game in game_header.iterrows():
-                        home_id = game["HOME_TEAM_ID"]
-                        away_id = game["VISITOR_TEAM_ID"]
-                        
-                        if home_id == team_id:
-                            opp_abbr = id_to_abbr.get(away_id)
-                            print(f"[Schedule] ✅ {team_abbr} vs {opp_abbr} (today)")
-                            return opp_abbr, team_abbr
-                        elif away_id == team_id:
-                            opp_abbr = id_to_abbr.get(home_id)
-                            print(f"[Schedule] ✅ {team_abbr} @ {opp_abbr} (today)")
-                            return opp_abbr, team_abbr
-        
-        except Exception as e:
-            print(f"[Schedule] ⚠️ Scoreboard check failed: {e}")
-        
-        # Step 3: Fall back to upcoming opponent API
-        print(f"[Schedule] ℹ️ {team_abbr} not playing today, checking next game...")
+        if "TEAM_ABBREVIATION" not in df.columns:
+            print(f"[Schedule] ⚠️ TEAM_ABBREVIATION column missing for {player}.")
+            return None, None
+
+        team_abbr = str(df["TEAM_ABBREVIATION"].mode()[0]).strip()
+        team_id = None
+
+        # --- Reverse lookup: abbreviation → ID
+        for tid, abbr in id_map.items():
+            if abbr == team_abbr:
+                team_id = tid
+                break
+
+        if team_id is None:
+            print(f"[Schedule] ⚠️ Could not find team ID for {team_abbr}.")
+            return None, None
+
+        # --- Match player’s team to today's games
+        for _, g in game_header.iterrows():
+            home_id = g["HOME_TEAM_ID"]
+            away_id = g["VISITOR_TEAM_ID"]
+            if home_id == team_id:
+                opp_id, side = away_id, "home"
+            elif away_id == team_id:
+                opp_id, side = home_id, "away"
+            else:
+                continue
+
+            opp_abbr = id_map.get(opp_id, "UNK")
+            symbol = "vs" if side == "home" else "@"
+            print(f"[Schedule] ✅ {team_abbr} plays today {symbol} {opp_abbr}")
+            return opp_abbr, team_abbr
+
+        # --- No game found today
+        print(f"[Schedule] ⚠️ No matchup found for {team_abbr} today — using fallback.")
         return get_upcoming_opponent_abbr(player, settings)
-        
+
     except Exception as e:
-        print(f"[Schedule] ❌ Error: {e}")
-        import traceback
+        print(f"[Schedule] ❌ Opponent lookup failed: {e}")
         traceback.print_exc()
-        return None, None
+        time.sleep(1)
+        return get_upcoming_opponent_abbr(player, settings)
+
 
 # ===============================
 # INJURY STATUS
@@ -922,7 +903,6 @@ def grade_probabilities(df, stat_col, line, proj_mins, avg_mins, injury_status=N
         safe_n = n if 'n' in locals() else 0
         safe_mean = mean if 'mean' in locals() else 0.0
         return safe_p, safe_n, safe_mean
-
 # ===============================
 # DvP MULTIPLIER
 # ===============================
@@ -951,12 +931,10 @@ def get_dvp_multiplier(opponent_abbr, position, stat_key):
         if stat_key == "REB+AST":
             reb_rank = pos_dict.get("REB")
             ast_rank = pos_dict.get("AST")
-            
             if reb_rank is not None and ast_rank is not None:
                 avg_rank = (reb_rank + ast_rank) / 2.0
                 multiplier = 1.1 - (avg_rank - 1) / 300
                 print(f"[DvP] {opponent_abbr} vs {position}: REB+AST avg={avg_rank:.1f} → {multiplier:.3f}")
-                return multiplier
             else:
                 return 1.0
         
@@ -964,48 +942,44 @@ def get_dvp_multiplier(opponent_abbr, position, stat_key):
             pts_rank = pos_dict.get("PTS")
             reb_rank = pos_dict.get("REB")
             ast_rank = pos_dict.get("AST")
-            
             if all(r is not None for r in [pts_rank, reb_rank, ast_rank]):
                 avg_rank = (pts_rank + reb_rank + ast_rank) / 3.0
                 multiplier = 1.1 - (avg_rank - 1) / 300
                 print(f"[DvP] {opponent_abbr} vs {position}: PRA avg={avg_rank:.1f} → {multiplier:.3f}")
-                return multiplier
             else:
                 return 1.0
         
         else:
             rank = pos_dict.get(stat_key)
-            
             if rank is None:
                 print(f"[DvP] ⚠️ Stat {stat_key} not found for {opponent_abbr} {position}")
                 return 1.0
-            
             multiplier = 1.1 - (rank - 1) / 300
             print(f"[DvP] {opponent_abbr} vs {position} on {stat_key}: rank={rank} → {multiplier:.3f}")
-            return multiplier
-            
+
+        # ===============================
+        # 🎯 DvP Accuracy Calibration — v2025.3a
+        # ===============================
+        if multiplier > 1.05:
+            multiplier = 1 + (multiplier - 1) * 0.7   # reduce overboost by 30%
+        elif multiplier < 0.95:
+            multiplier = 1 - (1 - multiplier) * 0.9   # soften negative hit slightly
+
+        return multiplier
+
     except Exception as e:
         print(f"[DvP] ❌ Error calculating multiplier: {e}")
         return 1.0
 
+
 # ===============================
 # UTILITY FUNCTIONS
 # ===============================
-def get_rest_days(player, settings):
-    """Estimate player's team's rest days before today's game."""
+# (Keep only real function definitions here — no direct code execution.)
+
+def get_rest_days(player, sched_path):
+    """Calculate rest days for a player based on schedule file."""
     try:
-        result = get_live_opponent_from_schedule(player, settings)
-        if result is None or len(result) != 2:
-            return 1
-        
-        opp, team_abbr = result
-        if team_abbr is None:
-            return 1
-
-        sched_path = os.path.join(settings["data_path"], f"{team_abbr}_schedule.csv")
-        if not os.path.exists(sched_path):
-            return 1
-
         import pandas as pd
         sched = pd.read_csv(sched_path)
         sched["GAME_DATE"] = pd.to_datetime(sched["GAME_DATE"])
@@ -1027,6 +1001,7 @@ def get_team_total(player, settings):
     """Estimate projected team total (points) for a player's team."""
     import random
 
+    # --- Baseline team offensive averages ---
     team_avgs = {
         "BOS": 117.5, "DEN": 115.8, "SAC": 118.2, "LAL": 116.3,
         "MIL": 120.1, "DAL": 118.0, "GSW": 117.9, "NYK": 113.0,
@@ -1038,18 +1013,22 @@ def get_team_total(player, settings):
         "SA": 110.9, "LAC": 115.4
     }
 
+    # --- Try to detect opponent and team abbreviation ---
     try:
         result = get_live_opponent_from_schedule(player, settings)
-        if result is None or len(result) != 2:
-            team_abbr = None
-        else:
+        if result and isinstance(result, tuple):
             opp, team_abbr = result
-    except Exception:
-        team_abbr = None
+        else:
+            opp, team_abbr = None, None
+    except Exception as e:
+        print(f"[TeamTotal] ⚠️ Could not fetch team/opponent: {e}")
+        opp, team_abbr = None, None
 
+    # --- Default baseline if no team data ---
     if team_abbr is None:
         return 112.0 + random.uniform(-2, 2)
 
+    # --- Pull base average and adjust by matchup difficulty ---
     team_total = team_avgs.get(team_abbr, 112.0)
 
     try:
@@ -1059,6 +1038,7 @@ def get_team_total(player, settings):
 
     team_total *= dvp_mult
     return round(team_total, 1)
+
 
 # ===============================
 # STAT MAP
@@ -1197,75 +1177,77 @@ def debug_projection(df, stat="REB+AST", line=12.5, player_name=""):
     print(f"   Over: {over_count}/{len(vals)} ({hit_rate:.1f}%)")
     print(f"   Under: {len(vals)-over_count}/{len(vals)} ({100-hit_rate:.1f}%)")
     print("="*60 + "\n")
+    # ===============================
+    # 📈 Recency-Weighted Projection — v2025.3a
+    # ===============================
+    try:
+        # Compute last-10 and last-20 averages (fallback to mean if not enough games)
+        if len(df) >= 10:
+            mean_l10 = df[stat_col].astype(float).tail(10).mean()
+        else:
+            mean_l10 = mean
+
+        if len(df) >= 20:
+            mean_l20 = df[stat_col].astype(float).tail(20).mean()
+        else:
+            mean_l20 = mean_l10
+
+        # Weighted blend (60% recent / 40% long-term)
+        weighted_proj = (0.6 * mean_l10) + (0.4 * mean_l20)
+
+        # Apply contextual multipliers
+        proj_stat = weighted_proj * context_mult
+        print(f"[Projection] L10={mean_l10:.2f}, L20={mean_l20:.2f}, Weighted={weighted_proj:.2f} → proj={proj_stat:.2f}")
+    except Exception as e:
+        print(f"[Projection] ⚠️ Recency weighting failed: {e}")
+        proj_stat = mean * context_mult
 
 # ===============================
-# ✅ FIXED: analyze_single_prop
+# ✅ ANALYZE SINGLE PROP — PropPulse+ v2025.3a (Accuracy-Calibrated Edition)
 # ===============================
 def analyze_single_prop(player, stat, line, odds, settings, debug_mode=False):
-    """Analyze a single prop and return results dict - FIXED VERSION"""
+    """Analyze a single prop and return results dict - fully tuned version"""
+    import os, time, numpy as np, pandas as pd
+    from scipy.stats import norm
+
+    # --- Load player logs ---
     path = os.path.join(settings["data_path"], f"{player.replace(' ', '_')}.csv")
     need_refresh = not os.path.exists(path) or (time.time() - os.path.getmtime(path)) / 3600 > 24
-
     if need_refresh:
         print(f"[Data] ⏳ Refreshing logs for {player}...")
         try:
             df = fetch_player_logs(player, save_dir=settings["data_path"], settings=settings)
-            if df is None or len(df) == 0:
-                raise ValueError("No data from BallDon'tLie")
-            print("[Source] ✅ Using BallDon'tLie data")
         except Exception as e:
             print(f"[BDL] ⚠️ BallDon'tLie failed: {e}")
-            print("[Fallback] Trying Basketball Reference instead...")
-            df = fetch_player_logs(
-                player,
-                save_dir=settings["data_path"],
-                settings=settings,
-                include_last_season=True
-            )
+            df = fetch_player_logs(player, save_dir=settings["data_path"], settings=settings, include_last_season=True)
         if df is None or len(df) == 0:
-            print(f"[Logs] ❌ Could not fetch logs for {player}.")
+            print(f"[Logs] ❌ Could not fetch logs for {player}")
             return None
-        print("[Source] ✅ Data loaded successfully")
     else:
         df = pd.read_csv(path)
         print(f"[Data] ✅ Loaded {len(df)} games for {player}")
 
-    # Clean minutes
+    # --- Clean minutes / DNPs ---
     if "MIN" in df.columns:
         def parse_minutes(val):
             if isinstance(val, str) and ":" in val:
-                try:
-                    m, s = val.split(":")
-                    return int(m) + int(s) / 60
-                except:
-                    return 0.0
+                m, s = val.split(":")
+                return int(m) + int(s) / 60
             try:
                 return float(val)
             except:
                 return 0.0
-
         df["MIN"] = df["MIN"].apply(parse_minutes)
-        before = len(df)
         df = df[df["MIN"] > 0]
-        after = len(df)
-        print(f"[Clean] Removed {before - after} DNP games ({after} remain).")
 
-    avg_mins = df["MIN"].mean() if "MIN" in df.columns and len(df["MIN"]) > 0 else 30
-    proj_mins = avg_mins
-
-    # Stat extraction
+    # --- Stat extraction ---
     stat_col = STAT_MAP.get(stat, stat)
     if isinstance(stat_col, list):
-        missing = [col for col in stat_col if col not in df.columns]
-        if missing:
-            print(f"[Error] ❌ Missing columns for {stat}: {missing}")
-            return None
         df["COMPOSITE"] = df[stat_col].sum(axis=1)
         vals = df["COMPOSITE"].astype(float)
-        print(f"[Composite] Using {'+'.join(stat_col)} for {stat}")
     else:
         if stat_col not in df.columns:
-            print(f"[Error] ❌ Stat '{stat}' not found in logs for {player}.")
+            print(f"[Error] ❌ Stat '{stat}' not found for {player}")
             return None
         vals = df[stat_col].astype(float)
 
@@ -1275,384 +1257,430 @@ def analyze_single_prop(player, stat, line, odds, settings, debug_mode=False):
     p_norm = 1 - norm.cdf(line, mean, std if std > 0 else 1)
     p_base = 0.6 * p_norm + 0.4 * p_emp
 
-    # Contextual probabilities
+    # --- Contextual factors ---
     p_ha = get_homeaway_adjustment(player, stat, line, settings)
     p_l10 = get_recent_form(df, stat_col if not isinstance(stat_col, list) else "COMPOSITE", line)
-    p_dvp = p_base
     p_usage = get_usage_factor(player, stat, settings)
 
-    # ✅ FIX: Safe opponent handling
+    # --- Opponent + DvP ---
     try:
-        result = get_live_opponent_from_schedule(player, settings)
-        
-        if result is None or len(result) != 2:
-            print(f"[Warning] Could not determine opponent, using neutral DvP")
-            opp, team_abbr = None, None
-        else:
-            opp, team_abbr = result
+        opp, team_abbr = get_live_opponent_from_schedule(player, settings)
+        if not opp:
+            print(f"[Schedule] ⚠️ Could not determine opponent, using fallback...")
+            opp, team_abbr = get_upcoming_opponent_abbr(player, settings)
     except Exception as e:
-        print(f"[Error] Opponent lookup failed: {e}")
-        opp, team_abbr = None, None
+        print(f"[Schedule] ❌ Opponent detection failed: {e}")
+        opp, team_abbr = get_upcoming_opponent_abbr(player, settings)
 
     pos = get_player_position_auto(player, df_logs=df, settings=settings)
-    
     try:
-        if opp and pos:
-            dvp_mult = get_dvp_multiplier(opp, pos, stat)
-        else:
-            dvp_mult = 1.0
-            print("[DvP] Using neutral multiplier (no opponent/position)")
+        dvp_mult = get_dvp_multiplier(opp, pos, stat) if (opp and pos) else 1.0
     except Exception as e:
         print(f"[DvP] ⚠️ Could not apply DvP: {e}")
         dvp_mult = 1.0
 
-    # Probability & Scoring
+    # --- Probability stacking ---
     n_games = len(df)
     maturity = min(1.0, n_games / 40)
-
-    w_base = 0.30 + 0.20 * maturity
-    w_l10 = 0.20 - 0.07 * maturity
-    w_ha = 0.10
-    w_dvp = 0.15 + 0.02 * maturity
-    w_usage = 0.20 - 0.05 * maturity
-    total_w = w_base + w_l10 + w_ha + w_dvp + w_usage
-    w_base, w_l10, w_ha, w_dvp, w_usage = [w / total_w for w in (w_base, w_l10, w_ha, w_dvp, w_usage)]
-
-    p_model = (
-        p_base * w_base +
-        p_l10 * w_l10 +
-        p_ha * w_ha +
-        p_dvp * w_dvp +
-        p_usage * w_usage
+    w_base, w_l10, w_ha, w_dvp, w_usage = (
+        0.30 + 0.2 * maturity,
+        0.20 - 0.07 * maturity,
+        0.10,
+        0.15 + 0.02 * maturity,
+        0.20 - 0.05 * maturity,
     )
+    total = sum((w_base, w_l10, w_ha, w_dvp, w_usage))
+    w_base, w_l10, w_ha, w_dvp, w_usage = [w / total for w in (w_base, w_l10, w_ha, w_dvp, w_usage)]
 
-    print(
-        f"[ProbStack] base={p_base:.3f}({w_base*100:.0f}%) | "
-        f"L10={p_l10:.3f}({w_l10*100:.0f}%) | "
-        f"HA={p_ha:.3f}({w_ha*100:.0f}%) | "
-        f"DvP={p_dvp:.3f}({w_dvp*100:.0f}%) | "
-        f"Usage={p_usage:.3f}({w_usage*100:.0f}%) → "
-        f"Model={p_model:.3f}"
-    )
+    p_dvp = p_base * dvp_mult
+    p_model = (p_base * w_base + p_l10 * w_l10 + p_ha * w_ha + p_dvp * w_dvp + p_usage * w_usage)
 
+        # ===============================
+    # 🎯 Confidence & Volatility Calibration — v2025.3a
+    # ===============================
     base_conf = 1 - (std / mean) if mean > 0 else 0.5
     confidence = max(0.1, base_conf * maturity)
 
+    # --- Volatility-based confidence boost (stable = more trust)
+    if std > 0 and mean > 0:
+        volatility_score = max(0.1, min(1.0, 1 - (std / mean)))
+        confidence *= 0.7 + 0.3 * volatility_score  # up to +30% boost
+
+    # --- Stat-type reliability weighting
+    if stat.upper() in ["REB", "AST"]:
+        confidence *= 1.05  # slightly higher reliability
+    elif stat.upper() in ["PTS", "PRA"]:
+        confidence *= 0.95  # slightly more volatile
+
+    # --- Clamp range
+    confidence = max(0.1, min(0.99, confidence))
+
+    # --- Trend/matchup synergy logic
     trend_strength = abs(p_l10 - 0.5) * 2
     matchup_strength = abs(dvp_mult - 1.0) / 0.15
 
     if (p_l10 > 0.5 and dvp_mult > 1.0) or (p_l10 < 0.5 and dvp_mult < 1.0):
-        synergy_strength = min(1.0, (trend_strength + matchup_strength) / 2)
-        boost = 1.03 + 0.05 * synergy_strength
-        confidence = min(confidence * boost, 1.0)
-        print(f"[Confidence] 🔼 Synergy boost {boost:.3f}× ({player})")
+        synergy = min(1.0, (trend_strength + matchup_strength) / 2)
+        confidence = min(confidence * (1.03 + 0.05 * synergy), 1.0)
     elif (p_l10 > 0.55 and dvp_mult < 0.97) or (p_l10 < 0.45 and dvp_mult > 1.03):
-        conflict_strength = min(1.0, (trend_strength + matchup_strength) / 2)
-        penalty = 1.00 - 0.05 * conflict_strength
-        confidence *= penalty
-        print(f"[Confidence] 🔻 Counter-synergy penalty {penalty:.3f}× ({player})")
+        conflict = min(1.0, (trend_strength + matchup_strength) / 2)
+        confidence *= (1.00 - 0.05 * conflict)
 
-    # --- Stat-type reliability
-    stat_baseline = {
-        "PTS": 0.9, "REB": 1.1, "AST": 1.05, "PRA": 0.95,
-        "RA": 0.95, "FG3M": 0.85, "STL": 0.75, "BLK": 0.70
-    }
-    stat_mult = stat_baseline.get(stat.upper(), 1.0)
-    confidence = max(0.1, min(base_conf * maturity * stat_mult, 0.95))
-
-    # --- Apply confidence to probability
-    p_model *= (0.5 + 0.5 * confidence)
-    p_model = max(0.05, min(0.95, p_model))
-
-    # --- Confidence-weighted EV
+    # --- Apply confidence to probability model
+    p_model = max(0.05, min(p_model * (0.5 + 0.5 * confidence), 0.95))
     p_book = american_to_prob(odds)
     ev_raw = ev_sportsbook(p_model, odds)
-    conf_weight = 0.5 + 0.5 * confidence
-    ev = ev_raw * conf_weight
-    edge = (p_model - p_book) * 100
-    ev_cents = ev * 100
 
-    print(f"[EV] ModelProb={p_model:.3f} | BookProb={p_book:.3f} | Edge={edge:+.2f}% | "
-          f"EV(raw)={ev_raw*100:+.2f}¢ | ConfAdj={conf_weight:.2f}× → EV(final)={ev_cents:+.2f}¢")
+    # --- Weak-signal penalty (low-confidence filter)
+    if confidence < 0.55 or ev_raw < 0.12:
+        confidence *= 0.85
+        ev_raw *= 0.85
+        print(f"[Filter] ⚠️ Low confidence or EV → reducing weight ({player})")
 
-    # --- Confidence penalty for noisy data
-    if confidence < 0.5:
-        ev_cents *= 0.75
-        edge *= 0.85
+    # --- Final EV (confidence-weighted)
+    ev = ev_raw * (0.5 + 0.5 * confidence)
 
-    # --- Injury + Position
+    # --- Context multipliers ---
     inj = get_injury_status(player, settings.get("injury_api_key"))
-    pos = get_player_position_auto(player, df_logs=df, settings=settings)
-
-    # --- Game context multipliers
-    dvp_mult = max(0.85, min(1.15, dvp_mult))
-    pace_mult = 1.0
-    league_avg_total = 112
     team_total = get_team_total(player, settings)
-    team_total_mult = min(1.10, max(0.90, (team_total / league_avg_total) if team_total else 1.0))
-
     rest_days = get_rest_days(player, settings)
+    team_mult = min(1.10, max(0.90, (team_total / 112) if team_total else 1.0))
     rest_mult = {0: 0.96, 1: 1.00, 2: 1.03}.get(rest_days, 1.05)
-    context_mult = dvp_mult * pace_mult * team_total_mult * rest_mult
-    print(f"[Context] DvP={dvp_mult:.3f} | TeamTotal={team_total_mult:.3f} | Rest={rest_mult:.3f} → Final={context_mult:.3f}×")
+    dvp_mult = max(0.85, min(1.15, dvp_mult))
+    context_mult = dvp_mult * team_mult * rest_mult
 
-    proj_stat = mean * context_mult
+    # ===============================
+    # 📈 Recency-Weighted Projection — v2025.3a
+    # ===============================
+    try:
+        if len(df) >= 10:
+            mean_l10 = df[stat_col].astype(float).tail(10).mean()
+        else:
+            mean_l10 = mean
+        if len(df) >= 20:
+            mean_l20 = df[stat_col].astype(float).tail(20).mean()
+        else:
+            mean_l20 = mean_l10
+        weighted_proj = (0.6 * mean_l10) + (0.4 * mean_l20)
+        proj_stat = weighted_proj * context_mult
+        print(f"[Projection] L10={mean_l10:.2f}, L20={mean_l20:.2f}, Weighted={weighted_proj:.2f} → proj={proj_stat:.2f}")
+    except Exception as e:
+        print(f"[Projection] ⚠️ Recency weighting failed: {e}")
+        proj_stat = mean * context_mult
 
-    # --- Grading System
+    # --- EV grading ---
+    ev_cents = ev * 100
     ev_score = ev_cents * confidence
-    if ev_score >= 8.0:
+    if ev_score >= 8:
         grade = "🔥 ELITE"
-    elif ev_score >= 4.0:
+    elif ev_score >= 4:
         grade = "💎 SOLID"
-    elif ev_score >= 1.0:
+    elif ev_score >= 1:
         grade = "⚖️ NEUTRAL"
     else:
         grade = "🚫 FADE"
 
-    print(f"[Grade] EV¢={ev_cents:+.2f} | Conf={confidence:.2f} → Score={ev_score:.2f} → {grade}")
+    print(f"[EV] {player}: EV¢={ev_cents:+.2f} | Conf={confidence:.2f} | Score={ev_score:.2f} → {grade}")
 
-    # --- Debug Mode optional detailed printout
     if debug_mode:
         debug_projection(df, stat=stat, line=line, player_name=player)
 
-    # --- Return structured result
+    # --- Return structured result ---
     return {
         "player": player,
         "stat": stat,
         "line": line,
         "odds": odds,
-        "opponent": opp,
-        "position": pos,
+        "opponent": opp or "N/A",
+        "position": pos or "N/A",
         "n_games": n_games,
         "p_model": p_model,
         "p_book": p_book,
         "projection": round(proj_stat, 2),
         "ev": ev,
-        "dvp_mult": dvp_mult,
+        "dvp_mult": round(dvp_mult, 3),
         "injury": inj,
         "confidence": round(confidence, 2),
         "grade": grade
     }
-# ===============================
-# UTILITIES (contextual functions)
-# ===============================
-from nba_api.stats.endpoints import scoreboardv2, commonteamroster
-from datetime import datetime
-import pandas as pd, os
 
-def get_live_opponent_from_schedule(player, settings=None):
-    """
-    ✅ PropPulse+ 2025.6 — Resilient opponent finder
-    Uses game_header (team IDs) + commonteamroster to resolve abbreviations.
-    Falls back to next opponent if no game today.
-    """
-    try:
-        today = datetime.now().strftime("%Y-%m-%d")
-        board = scoreboardv2.ScoreboardV2(game_date=today)
-        game_header = board.game_header.get_data_frame()
 
-        if game_header.empty:
-            print(f"[Schedule] ℹ️ No games today — checking next opponent...")
-            return get_upcoming_opponent_abbr(player, settings)
+    # --- Confidence weighting ---
+    base_conf = 1 - (std / mean) if mean > 0 else 0.5
+    confidence = max(0.1, base_conf * maturity)
 
-        # --- Grab home/away team IDs
-        pairs = list(zip(game_header["HOME_TEAM_ID"], game_header["VISITOR_TEAM_ID"]))
+    # ===============================
+    # 🎯 Confidence & Volatility Calibration — v2025.3a
+    # ===============================
+    # Volatility-based confidence boost (more stable = more trust)
+    if std > 0 and mean > 0:
+        volatility_score = max(0.1, min(1.0, 1 - (std / mean)))  # inverse volatility
+        confidence *= 0.7 + 0.3 * volatility_score  # up to +30% boost for stable props
 
-        # --- Load player's team abbreviation from local logs
-        path = os.path.join("data", f"{player.replace(' ', '_')}.csv")
-        if not os.path.exists(path):
-            print(f"[Schedule] ⚠️ No local logs for {player}.")
-            return None, None
+    # Stat-type reliability weighting
+    if stat.upper() in ["REB", "AST"]:
+        confidence *= 1.05   # more stable stats
+    elif stat.upper() in ["PTS", "PRA"]:
+        confidence *= 0.95   # slightly less reliable
 
-        df = pd.read_csv(path)
-        if "TEAM_ABBREVIATION" not in df.columns:
-            print(f"[Schedule] ⚠️ TEAM_ABBREVIATION missing for {player}.")
-            return None, None
+    # Clamp confidence to a sane range
+    confidence = max(0.1, min(0.99, confidence))
 
-        team_abbr = df["TEAM_ABBREVIATION"].mode()[0]
+    # Trend/matchup synergy
+    trend_strength = abs(p_l10 - 0.5) * 2
+    matchup_strength = abs(dvp_mult - 1.0) / 0.15
 
-        # --- Build lookup for teamID → abbreviation (using commonteamroster)
-        all_teams = commonteamroster.CommonTeamRoster(season=datetime.now().year).get_data_frames()[1]
-        id_map = dict(zip(all_teams["TEAM_ID"], all_teams["ABBREVIATION"]))
+    if (p_l10 > 0.5 and dvp_mult > 1.0) or (p_l10 < 0.5 and dvp_mult < 1.0):
+        synergy = min(1.0, (trend_strength + matchup_strength) / 2)
+        confidence = min(confidence * (1.03 + 0.05 * synergy), 1.0)
+    elif (p_l10 > 0.55 and dvp_mult < 0.97) or (p_l10 < 0.45 and dvp_mult > 1.03):
+        conflict = min(1.0, (trend_strength + matchup_strength) / 2)
+        confidence *= (1.00 - 0.05 * conflict)
 
-        # --- Reverse lookup: abbreviation → ID
-        inv_map = {v: k for k, v in id_map.items()}
-        team_id = inv_map.get(team_abbr)
+    # Apply confidence to probability model (soft shrink)
+    p_model = max(0.05, min(p_model * (0.5 + 0.5 * confidence), 0.95))
 
-        if team_id is None:
-            print(f"[Schedule] ⚠️ Could not map team ID for {team_abbr}.")
-            return None, None
+    # Book prob + raw EV from adjusted model prob
+    p_book = american_to_prob(odds)
+    ev_raw = ev_sportsbook(p_model, odds)
 
-        # --- Match today’s schedule
-        for home_id, away_id in pairs:
-            if home_id == team_id:
-                opp_id = away_id
-                side = "home"
-            elif away_id == team_id:
-                opp_id = home_id
-                side = "away"
-            else:
-                continue
+    # Weak-signal penalty AFTER we have ev_raw
+    if confidence < 0.55 or ev_raw < 0.12:
+        confidence *= 0.85
+        ev_raw *= 0.85
+        print(f"[Filter] ⚠️ Low confidence or EV → reducing weight ({player})")
 
-            opp_abbr = id_map.get(opp_id, None)
-            if opp_abbr:
-                symbol = "vs" if side == "home" else "@"
-                print(f"[Schedule] ✅ {team_abbr} plays today {symbol} {opp_abbr}")
-                return opp_abbr, team_abbr
+    # Final EV (confidence-weighted)
+    ev = ev_raw * (0.5 + 0.5 * confidence)
 
-        print(f"[Schedule] ℹ️ {team_abbr} not in today's scoreboard — checking next opponent...")
-        return get_upcoming_opponent_abbr(player, settings)
+    # ===============================
+    # Projection context multipliers (team/rest/dvp clamp)
+    # ===============================
+    inj = get_injury_status(player, settings.get("injury_api_key"))
+    team_total = get_team_total(player, settings)
+    rest_days = get_rest_days(player, settings)
+    team_mult = min(1.10, max(0.90, (team_total / 112) if team_total else 1.0))
+    rest_mult = {0: 0.96, 1: 1.00, 2: 1.03}.get(rest_days, 1.05)
+    dvp_mult = max(0.85, min(1.15, dvp_mult))  # post-clamp after calibration in get_dvp_multiplier
+    context_mult = dvp_mult * team_mult * rest_mult
+    proj_stat = mean * context_mult
 
-    except Exception as e:
-        print(f"[Schedule] ⚠️ Could not resolve opponent for {player}: {e}")
-        return get_upcoming_opponent_abbr(player, settings)
-def get_dvp_multiplier(opp_abbr, position, stat, player_df=None):
-    """
-    Returns a Defense-vs-Position (DvP) multiplier based on opponent strength
-    for a given stat and position. Scales around 1.00 (neutral),
-    lower = tougher matchup, higher = easier matchup.
-    """
-    try:
-        if not opp_abbr or not position:
-            print("[DvP] ⚠️ Missing opponent or position, using neutral 1.0")
-            return 1.0
+    # --- EV grading (using tuned config) ---
+    ev_pct = ev * 100
+    gap_abs = abs(proj_stat - line)
+    grade = grade_prop(ev_pct, confidence, gap_abs, dvp_mult)
+    print(f"[EV] {player}: EV%={ev_pct:.2f}% | Conf={confidence:.2f} | Gap={gap_abs:.2f} → {grade}")
 
-        # Simplified baseline table (can be replaced by live API or CSV later)
-        dvp_baseline = {
-            "PTS": {"PG": 1.03, "SG": 1.00, "SF": 0.98, "PF": 0.96, "C": 0.95},
-            "REB": {"PG": 0.97, "SG": 0.99, "SF": 1.02, "PF": 1.05, "C": 1.06},
-            "AST": {"PG": 1.05, "SG": 1.02, "SF": 0.98, "PF": 0.95, "C": 0.90},
-            "PRA": {"PG": 1.03, "SG": 1.00, "SF": 0.99, "PF": 0.97, "C": 0.96},
-            "RA":  {"PG": 1.01, "SG": 1.00, "SF": 1.00, "PF": 0.99, "C": 1.01},
-            "FG3M": {"PG": 1.04, "SG": 1.03, "SF": 1.00, "PF": 0.95, "C": 0.85},
-        }
 
-        base = dvp_baseline.get(stat.upper(), {}).get(position.upper(), 1.0)
 
-        # Add random small context noise if needed (keeps projections dynamic)
-        if player_df is not None and "MATCHUP" in player_df.columns:
-            games = player_df[player_df["MATCHUP"].str.contains(opp_abbr, na=False)]
-            if len(games) > 0:
-                stat_col = STAT_MAP.get(stat, stat)
-                opp_mean = games[stat_col].astype(float).mean()
-                player_mean = player_df[stat_col].astype(float).mean()
-                if player_mean > 0:
-                    perf_ratio = opp_mean / player_mean
-                    adj = np.clip(perf_ratio, 0.90, 1.10)
-                    base *= adj
-                    print(f"[DvP] {opp_abbr} vs {position} on {stat}: ratio={perf_ratio:.3f} → adj={adj:.3f}")
+    if debug_mode:
+        debug_projection(df, stat=stat, line=line, player_name=player)
 
-        base = round(base, 3)
-        print(f"[DvP] {opp_abbr} vs {position} on {stat}: → mult={base:.3f}")
-        return base
+    # ==============================
+    # ✅ Correct Result Scoring Logic
+    # ==============================
+    actual = None  # placeholder (can attach box-score later)
+    direction = "Higher" if proj_stat > line else "Lower"
 
-    except Exception as e:
-        print(f"[DvP] ⚠️ Error calculating DvP multiplier: {e}")
-        return 1.0
-def get_usage_factor(player, stat, settings):
-    """
-    Estimate player usage factor (scaled 0.95–1.05) based on shot volume,
-    touches, or minutes trend. Falls back to minutes-based trend when
-    advanced stats are missing.
-    """
-    try:
-        path = os.path.join(settings["data_path"], f"{player.replace(' ', '_')}.csv")
-        if not os.path.exists(path):
-            return 1.0
-
-        df = pd.read_csv(path)
-        stat = STAT_MAP.get(stat, stat)
-
-        # --- Prefer usage-like columns if available
-        possible_cols = ["FGA", "USG%", "TOUCHES", "POSS"]
-        usage_col = next((c for c in possible_cols if c in df.columns), None)
-
-        if usage_col:
-            last10 = df.tail(10)[usage_col].astype(float)
-            season_avg = df[usage_col].astype(float).mean()
-        elif "MIN" in df.columns:
-            last10 = df.tail(10)["MIN"].astype(float)
-            season_avg = df["MIN"].astype(float).mean()
+    if abs(proj_stat - line) < 0.5:
+        result_symbol = "⚠️"
+    else:
+        if direction == "Higher":
+            result_symbol = "✓" if (actual and actual > line) else "✗"
+        elif direction == "Lower":
+            result_symbol = "✓" if (actual and actual < line) else "✗"
         else:
-            return 1.0
+            result_symbol = "⚠️"
 
-        if season_avg <= 0:
-            return 1.0
-
-        recent_avg = last10.mean()
-        ratio = recent_avg / season_avg
-        usage_mult = np.clip(ratio, 0.95, 1.05)
-
-        print(f"[Usage] {player}: recent_avg={recent_avg:.1f}, season_avg={season_avg:.1f} → mult={usage_mult:.3f}")
-        return usage_mult
-    except Exception as e:
-        print(f"[Usage] ⚠️ Could not compute usage for {player}: {e}")
-        return 1.0
-def get_recent_form(df, stat_col, line):
+    # --- Return structured result ---
+    return {
+        "player": player,
+        "stat": stat,
+        "line": line,
+        "odds": odds,
+        "opponent": opp or "N/A",
+        "position": pos or "N/A",
+        "n_games": n_games,
+        "p_model": p_model,
+        "p_book": p_book,
+        "projection": round(proj_stat, 2),
+        "ev": ev,
+        "dvp_mult": round(dvp_mult, 3),
+        "injury": inj,
+        "confidence": round(confidence, 2),
+        "grade": grade,
+        "result": result_symbol,
+        "direction": direction
+    }
+# ================================================
+# 🎯 GRADING LOGIC (using tuned config)
+# ================================================
+def grade_prop(ev_pct, conf, gap_abs, dvp):
     """
-    Compute recent-form probability (L10 games) of going over the line.
-    Returns the fraction of games over in the last 10, scaled slightly
-    toward 0.5 to prevent overreaction to small streaks.
+    Apply tuned rules from calibration to classify each prop.
     """
-    try:
-        if stat_col not in df.columns:
-            print(f"[L10] ⚠️ Missing stat column: {stat_col}")
-            return 0.5
+    cfg = CONFIG_TUNED
+    if not cfg:
+        return "NEUTRAL"
 
-        last10 = df.tail(10)[stat_col].astype(float)
-        if len(last10) == 0:
-            return 0.5
+    filters = cfg["filters"]
+    grading = cfg["grading"]
+    dvp_rules = cfg["dvp_rules"]
 
-        p_l10 = np.mean(last10 > line)
-        smoothed = 0.5 + (p_l10 - 0.5) * 0.8  # regression to mean (dampens streaks)
-        print(f"[L10] {stat_col} → {p_l10:.2f} raw → {smoothed:.2f} smoothed")
-        return smoothed
-    except Exception as e:
-        print(f"[L10] ⚠️ Error computing recent form: {e}")
-        return 0.5
-def get_homeaway_adjustment(player, stat, line, settings):
-    """
-    Return a probability adjustment based on home/away splits.
-    Increases confidence slightly for home players and decreases for away.
-    """
-    try:
-        df = pd.read_csv(os.path.join(settings["data_path"], f"{player.replace(' ', '_')}.csv"))
-        if "MATCHUP" not in df.columns:
-            return 1.0
+    # --- Adjust confidence based on DvP ---
+    if dvp and not np.isnan(dvp):
+        if dvp < dvp_rules["penalty_threshold"]:
+            conf *= dvp_rules["penalty_factor"]
+        elif dvp > dvp_rules["boost_threshold"]:
+            conf *= dvp_rules["boost_factor"]
+        conf = max(0.0, min(1.0, conf))
 
-        # Detect home (no '@') vs away ('@')
-        home_games = df[~df["MATCHUP"].str.contains("@", na=False)]
-        away_games = df[df["MATCHUP"].str.contains("@", na=False)]
+    # --- Exclusions ---
+    if gap_abs < filters["exclude_close_to_line_gap_abs"]:
+        return "⚠️ TOO CLOSE"
+    if conf < filters["exclude_low_confidence"]:
+        return "LOW CONF"
+    if ev_pct < filters["ev_floor_percent"]:
+        return "LOW EV"
 
-        if len(home_games) < 5 or len(away_games) < 5:
-            return 1.0  # too few samples
+    # --- Grading tiers ---
+    if (ev_pct >= grading["elite"]["ev_min_pct"]
+        and conf >= grading["elite"]["conf_min"]
+        and gap_abs >= grading["elite"]["gap_min"]):
+        return "🔥 ELITE"
 
-        stat = STAT_MAP.get(stat, stat)
-        if stat not in df.columns:
-            return 1.0
+    if (ev_pct >= grading["solid"]["ev_min_pct"]
+        and conf >= grading["solid"]["conf_min"]
+        and gap_abs >= grading["solid"]["gap_min"]):
+        return "✅ SOLID"
 
-        home_mean = home_games[stat].mean()
-        away_mean = away_games[stat].mean()
-        overall_mean = df[stat].mean()
-
-        if overall_mean == 0:
-            return 1.0
-
-        adj = (home_mean - away_mean) / overall_mean
-        adj = np.clip(1 + adj * 0.2, 0.95, 1.05)
-        print(f"[Home/Away] {player}: home_mean={home_mean:.2f}, away_mean={away_mean:.2f}, adj={adj:.3f}")
-        return adj
-    except Exception as e:
-        print(f"[Home/Away] ⚠️ Could not compute adjustment for {player}: {e}")
-        return 1.0
+    return "NEUTRAL"
 
 # ===============================
-# MAIN (stable interactive version)
+# 🔁 Batch Analyzer (for Auto Mode)
+# ===============================
+def batch_analyze_props(props_list, settings):
+    """
+    Runs analyze_single_prop() for a list of player props.
+    Each entry in props_list should be a dict with:
+        {'player': str, 'stat': str, 'line': float, 'odds': int}
+    Returns a list of result dicts.
+    """
+    results = []
+    for i, prop in enumerate(props_list, start=1):
+        player = prop.get("player")
+        stat = prop.get("stat")
+        line = prop.get("line")
+        odds = prop.get("odds")
+        print(f"\n[{i}/{len(props_list)}] 📊 {player} — {stat} {line}")
+        try:
+            result = analyze_single_prop(player, stat, line, odds, settings, debug_mode=False)
+            if result:
+                results.append(result)
+        except Exception as e:
+            print(f"[Batch] ⚠️ Error analyzing {player}: {e}")
+    return results
+# ===============================
+# 🏆 Display Summary Helper
+# ===============================
+def display_top_props(results, top_n=10):
+    """Prints the top EV props in a clean summary format."""
+    import pandas as pd
+
+    if not results:
+        print("⚠️ No results to display.")
+        return
+
+    df = pd.DataFrame(results)
+    # Ensure numeric EV column
+    try:
+        df["EV¢"] = df["EV¢"].astype(float)
+    except Exception:
+        pass
+
+    df_sorted = df.sort_values("EV¢", ascending=False).head(top_n)
+
+    print("\n🏆 Top EV Props:")
+    print("===============================================")
+    for _, row in df_sorted.iterrows():
+        print(f"{row['Player']} — {row['Stat']} {row['Line']}")
+        print(f"   EV: {row['EV¢']}¢ | Conf: {row['Confidence']:.2f} | Grade: {row['Grade']}")
+    print("===============================================")
+
+# ===============================
+# 🕓 DAILY SCHEDULE AUTO-REFRESH
+# ===============================
+import os, sys, json, time, requests
+from datetime import datetime
+# from analyze import analyze_single_prop  # only if modularized
+# from settings import load_settings       # only if modularized
+
+def refresh_daily_schedule(settings):
+    """
+    Automatically refreshes today's NBA schedule once per day.
+    Saves locally to data/schedule_today.json.
+    """
+    data_path = settings.get("data_path", "data/")
+    os.makedirs(data_path, exist_ok=True)
+    schedule_file = os.path.join(data_path, "schedule_today.json")
+
+    today = datetime.now().strftime("%Y-%m-%d")
+
+    # Check if file exists & is already today's
+    if os.path.exists(schedule_file):
+        try:
+            with open(schedule_file, "r") as f:
+                existing = json.load(f)
+            if existing.get("date") == today:
+                print(f"[Schedule] ✅ Up-to-date schedule cached for {today}")
+                return existing.get("games", [])
+        except Exception:
+            print("[Schedule] ⚠️ Corrupted cache, re-fetching...")
+
+    print("[Schedule] 🔄 Fetching fresh schedule from NBA API...")
+
+    try:
+        url = "https://cdn.nba.com/static/json/staticData/scheduleLeagueV2_1.json"
+        r = requests.get(url, timeout=8)
+        r.raise_for_status()
+        full = r.json()
+
+        # Extract today's games
+        games_today = []
+        for league in full.get("leagueSchedule", {}).get("gameDates", []):
+            if league.get("gameDate") == today:
+                games_today.extend(league.get("games", []))
+
+        # Save new cache
+        with open(schedule_file, "w") as f:
+            json.dump({"date": today, "games": games_today}, f, indent=2)
+
+        print(f"[Schedule] ✅ Saved {len(games_today)} games for {today}")
+        return games_today
+
+    except Exception as e:
+        print(f"[Schedule] ❌ Failed to refresh schedule: {e}")
+        return []
+
+
+# ===============================
+# 🧠 MAIN (PropPulse+ v2025.4 — Stable)
 # ===============================
 def main():
-    settings = load_settings()
+    # analyze_single_prop is already defined in this file
+    # load_settings is already defined in this file
 
-    print("\n🧠 PropPulse+ Model v2025.3 — Player Prop EV Analyzer", flush=True)
+
+    settings = load_settings()
+    os.makedirs(settings.get("data_path", "data"), exist_ok=True)
+
+    # ✅ Attempt schedule refresh safely once per launch
+    try:
+        refresh_daily_schedule(settings)
+    except Exception as e:
+        print(f"[Startup] ⚠️ Schedule refresh failed: {e}")
+
+    print("\n🧠 PropPulse+ Model v2025.4 — Player Prop EV Analyzer", flush=True)
     print("=====================================================\n", flush=True)
 
     while True:
@@ -1673,9 +1701,18 @@ def main():
                 stat = input("Stat (PTS/REB/AST/REB+AST/PRA/FG3M): ").strip().upper()
                 line = float(input("Line (e.g., 20.5): ").strip())
                 odds = int(input("Odds (e.g., -110): ").strip())
-                debug_mode = input("Enable debug mode? (y/n, default=n): ").strip().lower() == "y"
 
-                result = analyze_single_prop(player, stat, line, odds, settings, debug_mode)
+                debug_input = input("Enable debug mode? (y/n, default=y): ").strip().lower()
+                debug_mode = (debug_input != "n" and debug_input != "no")
+
+                # --- Retry-safe analysis ---
+                try:
+                    result = analyze_single_prop(player, stat, line, odds, settings, debug_mode)
+                except Exception as e:
+                    print(f"[Retry] ⚠️ Initial analysis failed ({e}); retrying once...")
+                    time.sleep(2)
+                    result = analyze_single_prop(player, stat, line, odds, settings, debug_mode)
+
                 if not result:
                     print("❌ Analysis returned no result.")
                 else:
@@ -1698,6 +1735,9 @@ def main():
                           f"| DvP x{result.get('dvp_mult',1.0):.3f} | Injury: {result.get('injury','N/A')}")
                     print("=" * 60 + "\n")
 
+                    # --- Compact summary line for logs ---
+                    print(f"📈 {player} {stat} {line} → {grade} | EV={ev_cents:+.1f}¢ | Conf={conf:.2f}")
+
             except ValueError as ve:
                 print(f"❌ Invalid input: {ve}")
             except Exception as e:
@@ -1712,13 +1752,11 @@ def main():
             input("\nPress Enter to continue...")
 
 
-
-
 # ===============================
 # Program entry point
 # ===============================
 if __name__ == "__main__":
-    print("🧠 PropPulse+ Model v2025.3 — Player Prop EV Analyzer")
+    print("🧠 PropPulse+ Model v2025.4 — Player Prop EV Analyzer")
     print("=" * 60, flush=True)
     try:
         main()
@@ -1729,10 +1767,9 @@ if __name__ == "__main__":
         print(f"\n❌ Fatal error: {e}")
         traceback.print_exc()
     finally:
-        # On Windows console, keep the window open if launched via double-click
         try:
             if sys.stdin.isatty():
-                pass  # running in an open console
+                pass
             else:
                 input("\nPress Enter to close...")
         except Exception:
