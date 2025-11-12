@@ -510,23 +510,28 @@ def build_team_id_map():
 
 def get_live_opponent_from_schedule(player, settings=None):
     """
-    ✅ PropPulse+ 2025.6c — Fixed opponent detection
-    Uses NBA API scoreboard to map player's team to today's matchup.
-    Falls back to next opponent if no game today.
+    ✅ PropPulse+ 2025.6c — Fixed opponent detection with date override
+    Uses NBA API scoreboard to map player's team to matchup on specified date.
     """
     try:
         # Build team ID map
         id_map = build_team_id_map()
         
-        today = datetime.now().strftime("%Y-%m-%d")
+        # Use date from settings if provided, otherwise use today
+        if settings and 'analysis_date' in settings:
+            today = settings['analysis_date']
+            print(f"[Schedule] Using override date: {today}")
+        else:
+            today = datetime.now().strftime("%Y-%m-%d")
+        
         print(f"[Schedule] Checking games for {today}...")
         
-        # Get today's scoreboard
+        # Get today's scoreboard (REMOVED DUPLICATE LINE)
         board = scoreboardv2.ScoreboardV2(game_date=today)
         game_header = board.game_header.get_data_frame()
         
         if game_header.empty:
-            print(f"[Schedule] ℹ️ No NBA games today — checking next opponent...")
+            print(f"[Schedule] ℹ️ No NBA games on {today} — checking next opponent...")
             return get_upcoming_opponent_abbr(player, settings)
 
         # --- Load player's team abbreviation from local logs
@@ -538,7 +543,7 @@ def get_live_opponent_from_schedule(player, settings=None):
         if not os.path.exists(path):
             print(f"[Schedule] ⚠️ No local logs found for {player}.")
             return get_upcoming_opponent_abbr(player, settings)
-
+        
         df = pd.read_csv(path)
         
         # Try multiple ways to get team abbreviation
@@ -585,11 +590,11 @@ def get_live_opponent_from_schedule(player, settings=None):
 
             opp_abbr = id_map.get(opp_id, "UNK")
             symbol = "vs" if side == "home" else "@"
-            print(f"[Schedule] ✅ {team_abbr} plays today {symbol} {opp_abbr}")
+            print(f"[Schedule] ✅ {team_abbr} plays on {today} {symbol} {opp_abbr}")
             return opp_abbr, team_abbr
 
-        # --- No game found today
-        print(f"[Schedule] ⚠️ No matchup found for {team_abbr} today — using fallback.")
+        # --- No game found on selected date
+        print(f"[Schedule] ⚠️ No matchup found for {team_abbr} on {today} — using fallback.")
         return get_upcoming_opponent_abbr(player, settings)
 
     except Exception as e:

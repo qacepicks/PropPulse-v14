@@ -444,6 +444,18 @@ with st.sidebar:
     st.markdown("### ⚙️ Analysis Settings")
     st.markdown("---")
     
+    # Date Picker
+    from datetime import datetime, timedelta
+    analysis_date = st.date_input(
+        "Analysis Date",
+        value=datetime.now(),
+        min_value=datetime.now() - timedelta(days=7),
+        max_value=datetime.now() + timedelta(days=7),
+        help="Select the date for opponent/schedule lookup"
+    )
+    
+    st.markdown("---")
+    
     mode = st.radio(
         "Select Analysis Mode",
         ["🎯 Single Prop Analysis", "📊 Batch Manual Entry", "📁 CSV Import"],
@@ -526,6 +538,12 @@ if mode == "🎯 Single Prop Analysis":
         # ==========================================
         # RUN ANALYSIS
         # ==========================================
+        
+        # Display current date being analyzed
+        from datetime import datetime
+        analysis_date = datetime.now().strftime("%Y-%m-%d")
+        st.info(f"📅 Analyzing for date: **{analysis_date}**")
+        
         with st.spinner(f"🏀 Analyzing {player}'s {stat} projection..."):
             try:
                 buf = io.StringIO()
