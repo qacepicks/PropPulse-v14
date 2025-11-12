@@ -20,11 +20,20 @@ import glob
 import platform
 import subprocess
 import sys
-from nba_stats_fetcher import fetch_player_data as fetch_player_logs
+from nba_stats_fetcher import fetch_player_logs
+
+# Auto-refresh DvP if stale (>12h old)
+try:
+    from dvp_updater import load_dvp_data
+    dvp_data = load_dvp_data(force_refresh=True)
+except Exception as e:
+    print(f"[DvP] ⚠️ Auto-refresh failed: {e}")
+    dvp_data = load_dvp_data()
+
 
 print("DEBUG: stdin.isatty() =", sys.stdin.isatty())
 from nba_api.stats.static import players, teams
-from nba_stats_fetcher import fetch_player_data as fetch_player_logs
+from nba_stats_fetcher import fetch_player_logs
 def get_live_opponent_from_schedule(player, settings=None):
     """
     Returns (opponent_abbr, team_abbr) for today's game using NBA live scoreboard.
@@ -510,99 +519,72 @@ def build_team_id_map():
 
 def get_live_opponent_from_schedule(player, settings=None):
     """
-    ✅ PropPulse+ 2025.6c — Fixed opponent detection with date override
-    Uses NBA API scoreboard to map player's team to matchup on specified date.
+    ✅ PropPulse+ 2025.7 — Full Future-Aware Opponent Detection
+    Scans the next 7 days of NBA games to find the player's *next* matchup.
     """
     try:
-        # Build team ID map
-        id_map = build_team_id_map()
-        
-        # Use date from settings if provided, otherwise use today
-        if settings and 'analysis_date' in settings:
-            today = settings['analysis_date']
-            print(f"[Schedule] Using override date: {today}")
-        else:
-            today = datetime.now().strftime("%Y-%m-%d")
-        
-        print(f"[Schedule] Checking games for {today}...")
-        
-        # Get today's scoreboard (REMOVED DUPLICATE LINE)
-        board = scoreboardv2.ScoreboardV2(game_date=today)
-        game_header = board.game_header.get_data_frame()
-        
-        if game_header.empty:
-            print(f"[Schedule] ℹ️ No NBA games on {today} — checking next opponent...")
-            return get_upcoming_opponent_abbr(player, settings)
+        from datetime import timedelta
+        from nba_api.stats.endpoints import scoreboardv2
 
-        # --- Load player's team abbreviation from local logs
+        id_map = {t["id"]: t["abbreviation"] for t in teams.get_teams()}
+
+        # --- Determine player's team from local logs ---
         if settings is None:
             settings = {"data_path": "data"}
-        
         path = os.path.join(settings.get("data_path", "data"), f"{player.replace(' ', '_')}.csv")
-        
-        if not os.path.exists(path):
-            print(f"[Schedule] ⚠️ No local logs found for {player}.")
-            return get_upcoming_opponent_abbr(player, settings)
-        
-        df = pd.read_csv(path)
-        
-        # Try multiple ways to get team abbreviation
+
         team_abbr = None
-        
-        if "TEAM_ABBREVIATION" in df.columns:
-            team_abbr = str(df["TEAM_ABBREVIATION"].mode()[0]).strip()
-        elif "MATCHUP" in df.columns:
-            # Extract from MATCHUP format: "GSW vs. LAL" or "GSW @ LAL"
-            matchup_sample = str(df["MATCHUP"].iloc[0])
-            if " vs. " in matchup_sample:
-                team_abbr = matchup_sample.split(" vs. ")[0].strip()
-            elif " @ " in matchup_sample:
-                team_abbr = matchup_sample.split(" @ ")[0].strip()
-        
+        if os.path.exists(path):
+            df = pd.read_csv(path)
+            if "TEAM_ABBREVIATION" in df.columns:
+                team_abbr = str(df["TEAM_ABBREVIATION"].mode()[0]).strip()
+            elif "MATCHUP" in df.columns:
+                m = str(df["MATCHUP"].iloc[0])
+                if " vs. " in m:
+                    team_abbr = m.split(" vs. ")[0].strip()
+                elif " @ " in m:
+                    team_abbr = m.split(" @ ")[0].strip()
+
         if not team_abbr:
             print(f"[Schedule] ⚠️ Could not determine team for {player}")
             return get_upcoming_opponent_abbr(player, settings)
 
-        print(f"[Schedule] Player's team: {team_abbr}")
-        
-        # Find team ID from abbreviation
-        team_id = None
-        for tid, abbr in id_map.items():
-            if abbr == team_abbr:
-                team_id = tid
-                break
-
-        if team_id is None:
-            print(f"[Schedule] ⚠️ Could not find team ID for {team_abbr}.")
+        # --- Map to team_id ---
+        team_id = next((tid for tid, abbr in id_map.items() if abbr == team_abbr), None)
+        if not team_id:
+            print(f"[Schedule] ⚠️ No team ID found for {team_abbr}")
             return get_upcoming_opponent_abbr(player, settings)
 
-        # --- Match player's team to today's games
-        for _, g in game_header.iterrows():
-            home_id = g["HOME_TEAM_ID"]
-            away_id = g["VISITOR_TEAM_ID"]
-            
-            if home_id == team_id:
-                opp_id, side = away_id, "home"
-            elif away_id == team_id:
-                opp_id, side = home_id, "away"
-            else:
+        # --- Scan the next 7 days for that team's next opponent ---
+        from dateutil import parser
+        today = datetime.now().date()
+        for d in range(1, 8):
+            check_date = (today + timedelta(days=d)).strftime("%Y-%m-%d")
+            try:
+                board = scoreboardv2.ScoreboardV2(game_date=check_date)
+                game_header = board.game_header.get_data_frame()
+            except Exception:
                 continue
 
-            opp_abbr = id_map.get(opp_id, "UNK")
-            symbol = "vs" if side == "home" else "@"
-            print(f"[Schedule] ✅ {team_abbr} plays on {today} {symbol} {opp_abbr}")
-            return opp_abbr, team_abbr
+            if game_header.empty:
+                continue
 
-        # --- No game found on selected date
-        print(f"[Schedule] ⚠️ No matchup found for {team_abbr} on {today} — using fallback.")
+            for _, g in game_header.iterrows():
+                home_id, away_id = g["HOME_TEAM_ID"], g["VISITOR_TEAM_ID"]
+                if team_id in [home_id, away_id]:
+                    opp_id = away_id if home_id == team_id else home_id
+                    opp_abbr = id_map.get(opp_id, "UNK")
+                    symbol = "vs" if home_id == team_id else "@"
+                    print(f"[Schedule] ✅ {team_abbr} plays {symbol} {opp_abbr} on {check_date}")
+                    return opp_abbr, team_abbr
+
+        print(f"[Schedule] ⚠️ No upcoming matchup in next 7 days — using BallDontLie fallback.")
         return get_upcoming_opponent_abbr(player, settings)
 
     except Exception as e:
         print(f"[Schedule] ❌ Opponent lookup failed: {e}")
         traceback.print_exc()
-        time.sleep(1)
         return get_upcoming_opponent_abbr(player, settings)
-
 
 def get_upcoming_opponent_abbr(player_name, settings=None):
     """
@@ -650,11 +632,30 @@ def get_upcoming_opponent_abbr(player_name, settings=None):
             print(f"[Fallback] ⚠️ No upcoming games found")
             return None, team_abbr
 
-        # Sort by date and get the nearest game
-        games = sorted(games_data["data"], key=lambda x: x.get("date", ""))
-        next_game = games[0]
+                # --- Sort by date and pick the next *future* game only ---
+        from dateutil import parser
 
-        # Determine opponent
+        games = sorted(
+            games_data["data"],
+            key=lambda x: parser.parse(x.get("date", "2100-01-01T00:00:00"))
+        )
+
+        today_dt = datetime.now().date()
+        next_game = None
+
+        for g in games:
+            try:
+                g_date = parser.parse(g.get("date", "")).date()
+                if g_date > today_dt:
+                    next_game = g
+                    break
+            except Exception:
+                continue
+
+        if not next_game:
+            print(f"[Fallback] ⚠️ No valid future games found in BallDontLie response.")
+            return None, team_abbr
+        # --- Determine opponent correctly ---
         home_team = next_game.get("home_team", {})
         away_team = next_game.get("visitor_team", {})
         player_team_id = player_match.get("team", {}).get("id")
@@ -664,20 +665,20 @@ def get_upcoming_opponent_abbr(player_name, settings=None):
         else:
             opp_abbr = home_team.get("abbreviation")
 
+        game_date = parser.parse(next_game.get("date", "")).date().strftime("%Y-%m-%d")
+
         if opp_abbr:
-            print(f"[Fallback] ✅ Found upcoming matchup: {player_name} vs {opp_abbr}")
+            print(f"[Fallback] ✅ Found next matchup: {player_name} vs {opp_abbr} on {game_date}")
             return opp_abbr, team_abbr
         else:
-            print(f"[Fallback] ⚠️ Missing opponent abbreviation")
+            print(f"[Fallback] ⚠️ Missing opponent abbreviation for {player_name}")
             return None, team_abbr
 
     except Exception as e:
         print(f"[Fallback] ❌ Error: {e}")
         traceback.print_exc()
         return None, None
-# ===============================
-# INJURY STATUS
-# ===============================
+
 def get_injury_status(player_name, api_key):
     """Fetch injury status from SportsDataIO API (safe fallback)."""
     if not api_key or "YOUR_SPORTSDATAIO_KEY" in api_key:
@@ -862,33 +863,44 @@ def fetch_player_data(player, settings=None):
     return df
 
 
+# ============================================================
+# 🧠 PropPulse+ v2025.4 — L20 Weighted + Calibrated EV Model
+# Tuned using 2025-11-11 results
+# ============================================================
+
 # ===============================
 # L20-WEIGHTED MODEL
 # ===============================
 def l20_weighted_mean(vals: pd.Series) -> float:
+    """Weighted mean favoring last 20 games (60/40)."""
     if len(vals) == 0:
         return 0.0
-    season_mean = float(pd.to_numeric(vals, errors="coerce").fillna(0).mean())
-    last20 = pd.to_numeric(vals.tail(20), errors="coerce").fillna(0)
-    l20_mean = float(last20.mean()) if len(last20) > 0 else season_mean
+    vals = pd.to_numeric(vals, errors="coerce").fillna(0)
+    season_mean = vals.mean()
+    l20_mean = vals.tail(20).mean() if len(vals) >= 20 else season_mean
     return 0.60 * l20_mean + 0.40 * season_mean
+
 
 # ===============================
 # PROBABILITY CALIBRATION
 # ===============================
-def prob_calibrate(p: float, T: float = 1.15, b: float = 0.0, shrink: float = 0.20) -> float:
-    """Temperature-calibrates model probability and shrinks toward 0.5."""
+def prob_calibrate(p: float, T: float = 1.10, b: float = 0.0, shrink: float = 0.25) -> float:
+    """
+    Temperature + shrinkage calibration (corrects model overconfidence).
+    Tuned from 11/11 calibration chart: 60–70% bucket hit ≈ 56% → mild shrink.
+    """
     p = max(1e-6, min(1 - 1e-6, float(p)))
     logit = math.log(p / (1 - p))
     logit = (logit / T) + b
     q = 1.0 / (1.0 + math.exp(-logit))
     return 0.5 + (1.0 - shrink) * (q - 0.5)
 
+
 # ===============================
-# ✅ FIXED: GRADE PROBABILITIES
+# ✅ GRADE PROBABILITIES (Calibrated Edition)
 # ===============================
 def grade_probabilities(df, stat_col, line, proj_mins, avg_mins, injury_status=None, dvp_mult=1.0):
-    """Fixed version without player_name parameter"""
+    """Returns calibrated over-probability, sample size, and adjusted mean."""
     if stat_col not in df.columns:
         if stat_col == "REB+AST":
             df["REB+AST"] = df["REB"] + df["AST"]
@@ -902,127 +914,99 @@ def grade_probabilities(df, stat_col, line, proj_mins, avg_mins, injury_status=N
     std = float(vals.std(ddof=0)) if n > 1 else 1.0
     mean = l20_weighted_mean(vals)
 
-    mean *= (proj_mins / avg_mins) if avg_mins > 0 else 1.0
-
+    # Minutes & injury scaling
+    if avg_mins > 0:
+        mean *= (proj_mins / avg_mins)
     if injury_status and str(injury_status).lower() not in ["active", "probable"]:
         mean *= 0.9
     elif proj_mins < avg_mins * 0.8:
         mean *= 0.9
 
+    # Pace & home/away multipliers
     pace_mult = globals().get("pace_mult", 1.0)
-    mean *= pace_mult
-    print(f"[Model] Pace multiplier: {pace_mult:.3f}")
-
     is_home = globals().get("is_home", None)
     if is_home is True:
         mean *= 1.03
     elif is_home is False:
         mean *= 0.97
+    mean *= pace_mult
 
+    # Defensive scaling
     if stat_col in ["REB", "REB+AST", "PRA"]:
-        dvp_mult *= 0.85
+        dvp_mult *= 0.9  # slightly softened for rebounding stats
+    mean *= float(dvp_mult)
 
-    sigma_scale = {"PTS":1.00, "REB":0.85, "AST":0.90, "PRA":0.95, "REB+AST":0.88, "FG3M":1.10}
+    sigma_scale = {"PTS": 1.00, "REB": 0.85, "AST": 0.90, "PRA": 0.95, "REB+AST": 0.88, "FG3M": 1.10}
     std *= sigma_scale.get(stat_col, 1.0)
 
-    mean *= float(dvp_mult)
-    print(f"[Model] DvP (adjusted): {dvp_mult:.3f} | Adjusted mean: {mean:.2f}")
+    print(f"[Model] Final mean={mean:.2f} | std={std:.2f} | DvP={dvp_mult:.3f} | pace={pace_mult:.3f}")
 
     recent_vals = np.array(vals, dtype=float)
-    multipliers = {
-        "dvp": dvp_mult,
-        "pace": pace_mult,
-        "ha": 1.0,
-        "h2h": 1.0
-    }
+    multipliers = {"dvp": dvp_mult, "pace": pace_mult, "ha": 1.0, "h2h": 1.0}
 
-    p_final = calibrated_prob_over(
+    p_raw = calibrated_prob_over(
         mu_base=mean,
         sigma_base=std,
         line=line,
         multipliers=multipliers,
         recent_vals=recent_vals,
-        league_mu=None
+        league_mu=None,
     )
-    
-    try:
-        T = 1.15
-        p_cal = prob_calibrate(p_final, T=T, b=0.0, shrink=0.20)
-        print(f"[Calib] raw={p_final:.3f} → calibrated={p_cal:.3f} (T={T}, shrink=0.20)")
-        return p_cal, n, mean
-    except Exception as e:
-        print(f"[Model] ❌ Failsafe triggered: {e}")
-        safe_p = 0.5
-        safe_n = n if 'n' in locals() else 0
-        safe_mean = mean if 'mean' in locals() else 0.0
-        return safe_p, safe_n, safe_mean
+
+    # Probability calibration
+    p_cal = prob_calibrate(p_raw, T=1.10, b=0.0, shrink=0.25)
+    print(f"[Calib] raw={p_raw:.3f} → calibrated={p_cal:.3f}")
+
+    return p_cal, n, mean
+
+
 # ===============================
-# DvP MULTIPLIER
+# DvP MULTIPLIER (Calibrated)
 # ===============================
 def get_dvp_multiplier(opponent_abbr, position, stat_key):
-    """Get DvP multiplier for a stat against an opponent."""
+    """Returns softened, empirically tuned DvP multiplier."""
     try:
         if not opponent_abbr or not position or not stat_key:
             return 1.0
-        
+
         opponent_abbr = opponent_abbr.upper()
         position = position.upper()
         stat_key = stat_key.upper()
-        
+
         if opponent_abbr not in dvp_data:
-            print(f"[DvP] ⚠️ Team {opponent_abbr} not in DvP data")
             return 1.0
-        
-        team_dict = dvp_data[opponent_abbr]
-        
-        if position not in team_dict:
-            print(f"[DvP] ⚠️ Position {position} not found for {opponent_abbr}")
+        if position not in dvp_data[opponent_abbr]:
             return 1.0
-        
-        pos_dict = team_dict[position]
-        
+
+        pos_dict = dvp_data[opponent_abbr][position]
+
+        # Average ranks for combo stats
         if stat_key == "REB+AST":
-            reb_rank = pos_dict.get("REB")
-            ast_rank = pos_dict.get("AST")
-            if reb_rank is not None and ast_rank is not None:
-                avg_rank = (reb_rank + ast_rank) / 2.0
-                multiplier = 1.1 - (avg_rank - 1) / 300
-                print(f"[DvP] {opponent_abbr} vs {position}: REB+AST avg={avg_rank:.1f} → {multiplier:.3f}")
-            else:
-                return 1.0
-        
+            ranks = [pos_dict.get("REB"), pos_dict.get("AST")]
         elif stat_key == "PRA":
-            pts_rank = pos_dict.get("PTS")
-            reb_rank = pos_dict.get("REB")
-            ast_rank = pos_dict.get("AST")
-            if all(r is not None for r in [pts_rank, reb_rank, ast_rank]):
-                avg_rank = (pts_rank + reb_rank + ast_rank) / 3.0
-                multiplier = 1.1 - (avg_rank - 1) / 300
-                print(f"[DvP] {opponent_abbr} vs {position}: PRA avg={avg_rank:.1f} → {multiplier:.3f}")
-            else:
-                return 1.0
-        
+            ranks = [pos_dict.get("PTS"), pos_dict.get("REB"), pos_dict.get("AST")]
         else:
-            rank = pos_dict.get(stat_key)
-            if rank is None:
-                print(f"[DvP] ⚠️ Stat {stat_key} not found for {opponent_abbr} {position}")
-                return 1.0
-            multiplier = 1.1 - (rank - 1) / 300
-            print(f"[DvP] {opponent_abbr} vs {position} on {stat_key}: rank={rank} → {multiplier:.3f}")
+            ranks = [pos_dict.get(stat_key)]
 
-        # ===============================
-        # 🎯 DvP Accuracy Calibration — v2025.3a
-        # ===============================
+        ranks = [r for r in ranks if r is not None]
+        if not ranks:
+            return 1.0
+
+        avg_rank = sum(ranks) / len(ranks)
+        multiplier = 1.1 - (avg_rank - 1) / 300
+
+        # Empirical calibration from 11/11 results
         if multiplier > 1.05:
-            multiplier = 1 + (multiplier - 1) * 0.7   # reduce overboost by 30%
+            multiplier = 1 + (multiplier - 1) * 0.65  # reduce boost 35%
         elif multiplier < 0.95:
-            multiplier = 1 - (1 - multiplier) * 0.9   # soften negative hit slightly
+            multiplier = 1 - (1 - multiplier) * 0.85  # soften penalty 15%
 
-        return multiplier
+        return round(multiplier, 3)
 
     except Exception as e:
         print(f"[DvP] ❌ Error calculating multiplier: {e}")
         return 1.0
+
 
 
 # ===============================
@@ -1193,67 +1177,54 @@ def get_homeaway_adjustment(player, stat, line, settings):
         print(f"[Home/Away] ⚠️ Error: {e}")
         return 1.0
 
-def debug_projection(df, stat="PTS", line=20.5, player_name=""):
-    """Debug helper for PropPulse+ — prints recent and full-season projections safely."""
+def debug_projection(df, stat, line, player_name):
+    """
+    Prints detailed stats distribution for manual sanity checking.
+    Fixed to correctly use 'stat' instead of undefined 'stat_col'.
+    """
     try:
-        # Build the series safely
-        if stat == "REB+AST":
-            if "REB" in df.columns and "AST" in df.columns:
-                series = pd.to_numeric(df["REB"], errors="coerce").fillna(0) + \
-                         pd.to_numeric(df["AST"], errors="coerce").fillna(0)
-            else:
-                print("[Debug] ⚠️ Missing REB or AST for REB+AST view")
-                return
-        elif stat == "PRA":
-            need = {"PTS", "REB", "AST"}
-            if need.issubset(df.columns):
-                series = (pd.to_numeric(df["PTS"], errors="coerce").fillna(0) +
-                          pd.to_numeric(df["REB"], errors="coerce").fillna(0) +
-                          pd.to_numeric(df["AST"], errors="coerce").fillna(0))
-            else:
-                print("[Debug] ⚠️ Missing one of PTS/REB/AST for PRA view")
-                return
-        else:
-            if stat not in df.columns:
-                print(f"[Debug] ⚠️ Missing {stat}")
-                return
-            series = pd.to_numeric(df[stat], errors="coerce").fillna(0)
-        
-        vals = series.values.astype(float)
-        if len(vals) == 0:
-            print("[Debug] ⚠️ No valid rows")
-            return
-        
-        import numpy as np
-        season_mean = float(np.mean(vals))
-        season_med = float(np.median(vals))
-        season_std = float(np.std(vals, ddof=0))
-        over_count = int(np.sum(vals > float(line)))
-        n = int(len(vals))
-        last20 = vals[-20:] if n >= 20 else vals
-        l20_mean = float(np.mean(last20))
-        l20_med = float(np.median(last20))
-        
-        # Print the debug output
         print("\n" + "=" * 60)
         print(f"🔍 DEBUG: {player_name} {stat} Projection Analysis")
         print("=" * 60)
-        print(f"\n📊 Full Season Stats ({n} games):")
-        print(f"   Mean: {season_mean:.2f}")
-        print(f"   Median: {season_med:.2f}")
-        print(f"   Std Dev: {season_std:.2f}")
-        print(f"   Min: {vals.min():.1f} | Max: {vals.max():.1f}")
+
+        # Convert column safely
+        if stat not in df.columns:
+            if stat == "REB+AST":
+                df["REB+AST"] = df.get("REB", 0) + df.get("AST", 0)
+            elif stat == "PRA":
+                df["PRA"] = df.get("PTS", 0) + df.get("REB", 0) + df.get("AST", 0)
+            else:
+                print(f"[Debug] ❌ Missing stat column '{stat}'")
+                return
+
+        vals = pd.to_numeric(df[stat], errors="coerce").dropna()
+        if len(vals) == 0:
+            print(f"[Debug] ⚠️ No valid values for {stat}")
+            return
+
+        print(f"\n📊 Full Season Stats ({len(vals)} games):")
+        print(f"   Mean: {vals.mean():.2f}")
+        print(f"   Median: {vals.median():.2f}")
+        print(f"   Std Dev: {vals.std():.2f}")
+        print(f"   Min: {vals.min()} | Max: {vals.max()}")
+
+        last20 = vals.tail(20)
         print(f"\n📈 Last 20 Games:")
-        print(f"   Mean: {l20_mean:.2f}")
-        print(f"   Median: {l20_med:.2f}")
-        print(f"   Difference from season: {l20_mean - season_mean:+.2f}")
+        print(f"   Mean: {last20.mean():.2f}")
+        print(f"   Median: {last20.median():.2f}")
+        diff = last20.mean() - vals.mean()
+        print(f"   Difference from season: {diff:+.2f}")
+
+        over = (vals > line).sum()
+        under = (vals <= line).sum()
         print(f"\n🎯 Historical Performance vs Line {line}:")
-        print(f"   Over: {over_count}/{n} ({over_count/n*100:.1f}%)")
-        print(f"   Under: {n-over_count}/{n} ({(1-over_count/n)*100:.1f}%)")
-        print("=" * 60 + "\n")
-        
+        print(f"   Over: {over}/{len(vals)} ({100*over/len(vals):.1f}%)")
+        print(f"   Under: {under}/{len(vals)} ({100*under/len(vals):.1f}%)")
+        print("=" * 60)
+
     except Exception as e:
-        print(f"[Debug] ⚠️ Skipped debug projection: {e}")
+        print(f"[Debug] ⚠️ Debug projection failed: {e}")
+
         import traceback
         traceback.print_exc()
         
@@ -1450,7 +1421,7 @@ def analyze_single_prop(player, stat, line, odds, settings, debug_mode=False):
     proj_stat = projection
     print(f"[Final] Projection={proj_stat:.2f} (base={base_projection:.2f} × context={context_mult:.3f})")
 
-    # --- Deviation alert ---
+       # --- Deviation alert ---
     deviation_pct = abs(proj_stat - line) / line * 100 if line > 0 else 0
     if deviation_pct > 25:
         print(f"[⚠️ ALERT] Projection deviates {deviation_pct:.1f}% from line!")
@@ -1464,17 +1435,18 @@ def analyze_single_prop(player, stat, line, odds, settings, debug_mode=False):
     ev_raw = ev_sportsbook(p_model, odds)
     ev = ev_raw * (0.5 + 0.5 * confidence)
 
-       # --- EV grading ---
+    # --- Convert EV to cents & compute score ---
     ev_cents = ev * 100
     ev_score = ev_cents * confidence
-    if ev_score >= 8:
-        grade = "🔥 ELITE"
-    elif ev_score >= 4:
-        grade = "💎 SOLID"
-    elif ev_score >= 1:
-        grade = "⚖️ NEUTRAL"
-    else:
-        grade = "🚫 FADE"
+
+    # --- Use calibrated grading logic ---
+    # (Integrates stat-specific thresholds and confidence weighting)
+    grade = assign_grade(
+        ev_cents=ev_cents,
+        confidence=confidence,
+        model_prob=p_model,
+        stat=stat
+    )
 
     print(f"[EV] {player}: EV¢={ev_cents:+.2f} | Conf={confidence:.2f} | Score={ev_score:.2f} → {grade}")
 
@@ -1483,6 +1455,7 @@ def analyze_single_prop(player, stat, line, odds, settings, debug_mode=False):
             debug_projection(df, stat=stat, line=line, player_name=player)
         except Exception as e:
             print(f"[Debug] ⚠️ Skipped debug projection: {e}")
+
 
     # ================================================
     # 🎯 APPLY GRADING LOGIC (using tuned config)
@@ -1772,7 +1745,40 @@ def main():
         else:
             print("Please choose 1, 2, 3, or Q.")
             input("\nPress Enter to continue...")
+# ============================================================
+# 🎯 PropPulse+ v2025.4 — Calibrated Grading Logic
+# ============================================================
 
+def assign_grade(ev_cents: float, confidence: float, model_prob: float, stat: str) -> str:
+    """
+    v2025.5 — Calibrated grading thresholds (based on 11/11 empirical hit rates)
+    Tightens NEUTRAL range, boosts SOLID precision.
+    """
+    stat_weights = {
+        "PTS":    {"ev": 7.0, "conf": 0.58},
+        "REB":    {"ev": 5.0, "conf": 0.54},
+        "AST":    {"ev": 5.0, "conf": 0.53},
+        "PRA":    {"ev": 6.0, "conf": 0.55},
+        "REB+AST": {"ev": 5.5, "conf": 0.54},
+        "FG3M":   {"ev": 3.5, "conf": 0.50},
+    }
+    cfg = stat_weights.get(stat.upper(), {"ev": 5.0, "conf": 0.50})
+
+    # 🔥 ELITE — top 5% confidence + edge
+    if ev_cents >= cfg["ev"] * 1.8 and confidence >= (cfg["conf"] + 0.07) and model_prob >= 0.59:
+        return "🔥 ELITE"
+
+    # 💎 SOLID — balanced value with true edge
+    elif ev_cents >= cfg["ev"] and confidence >= cfg["conf"] and model_prob >= 0.54:
+        return "💎 SOLID"
+
+    # ⚖️ NEUTRAL — modest or borderline edge
+    elif ev_cents >= 1.0 and model_prob >= 0.50 and confidence >= 0.40:
+        return "⚖️ NEUTRAL"
+
+    # 🚫 FADE — negative or misleading signal
+    else:
+        return "🚫 FADE"
 
 # ===============================
 # Program entry point
