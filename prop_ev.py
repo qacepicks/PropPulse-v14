@@ -1139,19 +1139,21 @@ def get_recent_form(df, stat_col, line):
     """Compute recent-form probability (L10 games) of going over the line."""
     try:
         if stat_col not in df.columns:
-            print(f"[L10] ⚠️ Missing stat column: {stat_col}")
+            # Stat column missing → neutral probability
+            print(f"[EXIT] ❌ Missing stat column '{stat_col}' in dataframe for recent form check")
             return 0.5
 
         last10 = df.tail(10)[stat_col].astype(float)
         if len(last10) == 0:
+            # No recent games → neutral probability
+            print("[EXIT] ⚠️ No recent games available — using neutral probability 0.5")
             return 0.5
 
         p_l10 = np.mean(last10 > line)
-        smoothed = 0.5 + (p_l10 - 0.5) * 0.8
-        print(f"[L10] {stat_col} → {p_l10:.2f} raw → {smoothed:.2f} smoothed")
-        return smoothed
+        return float(p_l10)
+
     except Exception as e:
-        print(f"[L10] ⚠️ Error: {e}")
+        print(f"[Error] ⚠️ Failed to compute recent form: {e}")
         return 0.5
 
 def get_homeaway_adjustment(player, stat, line, settings):
@@ -1283,7 +1285,7 @@ def analyze_single_prop(player, stat, line, odds, settings, debug_mode=False):
     import os, time, numpy as np, pandas as pd
     from scipy.stats import norm
 
-    # --- Load player logs ---
+        # --- Load player logs ---
     path = os.path.join(settings["data_path"], f"{player.replace(' ', '_')}.csv")
     need_refresh = not os.path.exists(path) or (time.time() - os.path.getmtime(path)) / 3600 > 24
     if need_refresh:
@@ -1297,12 +1299,15 @@ def analyze_single_prop(player, stat, line, odds, settings, debug_mode=False):
             except Exception as e2:
                 print(f"[Backup] ❌ Could not fetch any logs: {e2}")
                 return None
+
         if df is None or len(df) == 0:
-            print(f"[Logs] ❌ Could not fetch logs for {player}")
+            print(f"[EXIT] ❌ No game logs for {player} — aborting analysis")
             return None
+
     else:
         df = pd.read_csv(path)
         print(f"[Data] ✅ Loaded {len(df)} games for {player}")
+
 
     # --- Clean minutes / DNPs ---
     if "MIN" in df.columns:
@@ -1501,6 +1506,7 @@ def analyze_single_prop(player, stat, line, odds, settings, debug_mode=False):
         ev_val = float(ev)
     except Exception:
         ev_val = 0.0
+    print(f"[RETURN] ✅ Returning result for {player} ({stat}) | proj={proj_stat:.2f}, ev={ev:.3f}, conf={confidence:.2f}")
 
     return {
         "player": player,
