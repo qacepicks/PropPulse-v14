@@ -777,11 +777,11 @@ elif mode == "📊 Batch Manual Entry":
             manual_entries.append({"player": player, "stat": stat, "line": line, "odds": odds})
 
     if manual_entries:
-        df_preview = pd.DataFrame(manual_entries)
-        st.subheader("📋 Preview")
-        st.dataframe(df_preview, use_container_width=True)
+    df_preview = pd.DataFrame(manual_entries)
+    st.subheader("📋 Preview")
+    st.dataframe(df_preview, use_container_width=True)
 
-        if st.button("🚀 ANALYZE BATCH", type="primary", use_container_width=True):
+    if st.button("🚀 ANALYZE BATCH", type="primary", use_container_width=True):
         if not manual_entries:
             st.error("⚠️ Please enter at least one valid player name.")
             st.stop()
