@@ -940,7 +940,7 @@ with tab2:
                 lambda col: [color_ev(v) for v in col], subset=["EV"]
             )
         st.markdown("### 📋 Props Table")
-        st.dataframe(styled_show, use_container_width=True, height=500)
+        st.dataframe(styled_show, use_container_width=True, height=1200)
     else:
         st.warning(
             "⚠️ No props match your current filters. Try adjusting the criteria above."
