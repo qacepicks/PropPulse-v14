@@ -1,6 +1,8 @@
+#!/usr/bin/env python3
 """
-NBA Player Props Stats Fetcher - BallDontLie API Version
-FIXED: Proper API authentication
+NBA Player Props Results Checker — BallDontLie API (Optimized Edition)
+Fetches final game stats and updates your Excel sheet with ✓ / ✗ results,
+including an automatic summary at the bottom.
 """
 
 import pandas as pd
@@ -8,541 +10,387 @@ from datetime import datetime, timedelta
 import time
 import os
 import requests
+from openpyxl import load_workbook
+from openpyxl.utils import get_column_letter
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
+
+# ===============================================================
+# 🧠 BallDontLie Stats Fetcher Class
+# ===============================================================
 class NBAStatsFetcherBallDontLie:
     def __init__(self, file_path, api_key):
-        """Initialize with your CSV file path and BallDontLie API key"""
         self.file_path = file_path
         self.file_type = 'csv' if file_path.endswith('.csv') else 'excel'
         self.api_key = api_key
         self.base_url = "https://api.balldontlie.io/v1"
-        
-        # Team abbreviation mapping
-        self.team_aliases = {
-            'PHX': ['PHOENIX', 'SUNS'],
-            'GSW': ['GOLDEN STATE', 'WARRIORS'],
-            'LAL': ['LA LAKERS', 'LAKERS', 'LOS ANGELES LAKERS'],
-            'LAC': ['LA CLIPPERS', 'CLIPPERS', 'LOS ANGELES CLIPPERS'],
-            'NYK': ['NEW YORK', 'KNICKS'],
-            'BKN': ['BROOKLYN', 'NETS'],
-            'NOP': ['NEW ORLEANS', 'PELICANS'],
-            'NO': ['NEW ORLEANS', 'PELICANS'],
-            'SAS': ['SAN ANTONIO', 'SPURS'],
-            'SA': ['SAN ANTONIO', 'SPURS'],
-            'CHI': ['CHICAGO', 'BULLS'],
-            'CHA': ['CHARLOTTE', 'HORNETS'],
-            'DET': ['DETROIT', 'PISTONS'],
-            'ORL': ['ORLANDO', 'MAGIC'],
-            'MIA': ['MIAMI', 'HEAT'],
-            'MEM': ['MEMPHIS', 'GRIZZLIES'],
-            'POR': ['PORTLAND', 'TRAIL BLAZERS'],
-            'TOR': ['TORONTO', 'RAPTORS'],
-            'WAS': ['WASHINGTON', 'WIZARDS'],
-            'HOU': ['HOUSTON', 'ROCKETS'],
-            'ATL': ['ATLANTA', 'HAWKS'],
-            'BOS': ['BOSTON', 'CELTICS'],
-            'CLE': ['CLEVELAND', 'CAVALIERS'],
-            'DAL': ['DALLAS', 'MAVERICKS'],
-            'DEN': ['DENVER', 'NUGGETS'],
-            'IND': ['INDIANA', 'PACERS'],
-            'MIL': ['MILWAUKEE', 'BUCKS'],
-            'MIN': ['MINNESOTA', 'TIMBERWOLVES'],
-            'OKC': ['OKLAHOMA CITY', 'THUNDER'],
-            'PHI': ['PHILADELPHIA', '76ERS'],
-            'SAC': ['SACRAMENTO', 'KINGS'],
-            'UTA': ['UTAH', 'JAZZ'],
-        }
-        
-        # Test API connection
+        self.team_aliases = {'NO': 'NOP', 'NY': 'NYK', 'SA': 'SAS'}
+        self.player_cache = {}  # Cache player IDs to avoid re-searching
         self._test_api_connection()
-    
+
+    # -----------------------------------------------------------
     def _get_headers(self):
-        """Get proper headers for API requests"""
-        # BallDontLie may use different header formats
-        # Try the most common ones
-        return {"Authorization": f"{self.api_key}"}
-    
+        """Use correct header format for BallDontLie API"""
+        return {"Authorization": self.api_key}
+
     def _test_api_connection(self):
-        """Test if API key is valid"""
+        """Ping API once to verify key"""
         headers = self._get_headers()
         try:
-            response = requests.get(
-                f"{self.base_url}/players?per_page=1", 
-                headers=headers,
-                timeout=10
-            )
-            
-            if response.status_code == 200:
+            r = requests.get(f"{self.base_url}/players?per_page=1", headers=headers, timeout=8)
+            if r.status_code == 200:
                 print("✅ BallDontLie API connected successfully!")
-                return True
-            elif response.status_code == 401:
-                print("❌ API KEY ERROR: Invalid or missing API key")
-                print("   → Get your key at: https://www.balldontlie.io/")
-                print("   → Update line: API_KEY = 'your_key_here'")
-                return False
-            elif response.status_code == 429:
-                print("⚠️ Rate limit reached - wait a moment")
-                return False
+            elif r.status_code == 401:
+                print("❌ Invalid API key — get yours at https://www.balldontlie.io/")
             else:
-                print(f"⚠️ API Warning: Status code {response.status_code}")
-                print(f"   Response: {response.text[:200]}")
-                return False
-                
-        except requests.exceptions.Timeout:
-            print("❌ API Timeout - check your connection")
-            return False
+                print(f"⚠️ API Warning: Status {r.status_code}")
         except Exception as e:
-            print(f"❌ API Connection Error: {e}")
-            return False
-    
-    def normalize_opponent(self, opponent):
-        """Normalize opponent abbreviation"""
-        if not opponent:
-            return None
-        opponent = str(opponent).upper().strip()
-        # Handle common variations
-        if opponent == 'NO':
-            return 'NOP'
-        if opponent == 'NY':
-            return 'NYK'
-        if opponent == 'SA':
-            return 'SAS'
-        return opponent
-    
+            print(f"❌ Connection failed: {e}")
+
+    # -----------------------------------------------------------
     def find_player_id(self, player_name):
-        """Find player ID by name using BallDontLie API"""
+        """Find player ID by name with caching for speed"""
+        # Check cache first
+        if player_name in self.player_cache:
+            return self.player_cache[player_name]
+        
         headers = self._get_headers()
-        
-        # Try different name formats
-        search_names = [
-            player_name,
-            player_name.replace('.', '').replace('  ', ' '),
-            player_name.replace('C.J.', 'CJ'),
-            player_name.replace('J.J.', 'JJ'),
+
+        # Normalize name for better matching
+        search_name = (
+            player_name.replace("-", " ")
+            .replace(".", "")
+            .replace("Jr", "")
+            .replace("III", "")
+            .replace("II", "")
+            .strip()
+        )
+
+        # Try multiple search strategies
+        search_terms = [
+            search_name,  # Full normalized name
+            search_name.split()[0],  # First name only
+            search_name.split()[-1],  # Last name only
         ]
-        
-        # Also try just last name if full name fails
-        name_parts = player_name.split()
-        if len(name_parts) >= 2:
-            search_names.append(name_parts[-1])  # Last name only
-        
-        for search_name in search_names:
+
+        for search_term in search_terms:
+            params = {"search": search_term, "per_page": 25}
             try:
-                # Search for player
-                params = {"search": search_name, "per_page": 25}
-                response = requests.get(
-                    f"{self.base_url}/players",
-                    headers=headers,
-                    params=params,
-                    timeout=10
-                )
+                res = requests.get(f"{self.base_url}/players", headers=headers, params=params, timeout=10)
                 
-                if response.status_code == 401:
-                    print(f"  ❌ API key invalid")
-                    return None, None
+                if res.status_code != 200:
+                    continue
+
+                response_data = res.json()
+                players = response_data.get("data", [])
                 
-                if response.status_code == 200:
-                    data = response.json()
-                    players = data.get('data', [])
+                if not players:
+                    continue
+
+                # Try exact match first
+                for p in players:
+                    full_name = f"{p.get('first_name', '')} {p.get('last_name', '')}".strip().lower()
                     
-                    if players:
-                        # Try to find best match
-                        for player in players:
-                            full_name = f"{player['first_name']} {player['last_name']}"
-                            
-                            # Exact match
-                            if full_name.lower() == player_name.lower():
-                                return player['id'], full_name
-                            
-                            # Close match (for names like "C.J." vs "CJ")
-                            if player_name.replace('.', '').replace(' ', '').lower() == \
-                               full_name.replace('.', '').replace(' ', '').lower():
-                                print(f"  ℹ️ Found as: {full_name}")
-                                return player['id'], full_name
-                        
-                        # If no exact match, use first result if searching last name
-                        if search_name == name_parts[-1] and len(players) > 0:
-                            player = players[0]
-                            full_name = f"{player['first_name']} {player['last_name']}"
-                            print(f"  ℹ️ Found as: {full_name}")
-                            return player['id'], full_name
-                
-                time.sleep(0.03)  # Minimal rate limiting
-                
+                    if full_name == search_name.lower():
+                        result = (p["id"], full_name.title())
+                        self.player_cache[player_name] = result
+                        return result
+
+                # Check for partial match
+                for p in players:
+                    full_name = f"{p.get('first_name', '')} {p.get('last_name', '')}".strip().lower()
+                    
+                    if (search_name.lower() in full_name or 
+                        full_name.split()[0] in search_name.lower() or 
+                        full_name.split()[-1] in search_name.lower()):
+                        result = (p["id"], full_name.title())
+                        self.player_cache[player_name] = result
+                        return result
+
             except Exception as e:
                 continue
-        
+
+        # Cache the failure too to avoid re-searching
+        self.player_cache[player_name] = (None, None)
         return None, None
-    
-    def match_opponent(self, home_team, visitor_team, target_opponent):
-        """Check if target opponent matches either team"""
-        if not target_opponent:
-            return False, None, None
-        
-        target = self.normalize_opponent(target_opponent)
-        home_abbr = home_team.get('abbreviation', '').upper()
-        visitor_abbr = visitor_team.get('abbreviation', '').upper()
-        
-        # Direct match
-        if target == home_abbr:
-            return True, home_team, 'vs'
-        if target == visitor_abbr:
-            return True, visitor_team, '@'
-        
-        # Check aliases
-        home_name = home_team.get('full_name', '').upper()
-        visitor_name = visitor_team.get('full_name', '').upper()
-        
-        if target in self.team_aliases:
-            for alias in self.team_aliases[target]:
-                if alias in home_name:
-                    return True, home_team, 'vs'
-                if alias in visitor_name:
-                    return True, visitor_team, '@'
-        
-        return False, None, None
-    
-    def fetch_player_game_stats(self, player_name, opponent=None, max_date=None, days_window=7):
-        """
-        Fetch player stats using BallDontLie API
-        """
+
+    # -----------------------------------------------------------
+    def normalize_opponent(self, opp):
+        if not opp:
+            return None
+        return self.team_aliases.get(opp.strip().upper(), opp.strip().upper())
+
+    # -----------------------------------------------------------
+    def fetch_player_game_stats(self, player_name, opponent=None, target_date=None):
         headers = self._get_headers()
-        
-        # Find player
         player_id, full_name = self.find_player_id(player_name)
         if not player_id:
-            print(f"  ❌ Player not found in API")
             return None
-        
-        # Set date range
-        if max_date is None:
-            max_date = datetime.now()
-        
-        # Search window
-        start_date = (max_date - timedelta(days=days_window)).strftime('%Y-%m-%d')
-        end_date = (max_date - timedelta(days=1)).strftime('%Y-%m-%d')
-        
+
+        if not target_date:
+            target_date = datetime.now()
+
+        # Expand search window to ensure we catch the game
+        start_date = (target_date - timedelta(days=7)).strftime("%Y-%m-%d")
+        end_date = (target_date + timedelta(days=2)).strftime("%Y-%m-%d")
+
         try:
-            # Get player stats for date range
-            params = {
-                "player_ids[]": player_id,
-                "start_date": start_date,
-                "end_date": end_date,
-                "per_page": 100
-            }
-            
-            response = requests.get(
-                f"{self.base_url}/stats",
-                headers=headers,
-                params=params,
-                timeout=10
-            )
-            
-            if response.status_code == 401:
-                print(f"  ❌ API key invalid")
+            params = {"player_ids[]": player_id, "start_date": start_date, "end_date": end_date, "per_page": 100}
+            res = requests.get(f"{self.base_url}/stats", headers=headers, params=params, timeout=10)
+            if res.status_code != 200:
                 return None
-            
-            if response.status_code != 200:
-                print(f"  ❌ API Error: {response.status_code}")
-                return None
-            
-            data = response.json()
-            games = data.get('data', [])
-            
+
+            games = res.json().get("data", [])
             if not games:
-                print(f"  ⚠️ No games in {days_window}-day window")
                 return None
-            
-            print(f"  📅 {len(games)} game(s) found")
-            
-            # Get unique game IDs and fetch details efficiently
-            game_ids = list(set([g.get('game', {}).get('id') for g in games if g.get('game', {}).get('id')]))
-            
+
+            # Batch fetch game details for efficiency
+            game_ids = list(set([g["game"]["id"] for g in games]))
             game_details = {}
-            for game_id in game_ids:
-                try:
-                    game_response = requests.get(
-                        f"{self.base_url}/games/{game_id}",
-                        headers=headers,
-                        timeout=10
-                    )
-                    if game_response.status_code == 200:
-                        game_details[game_id] = game_response.json().get('data', {})
-                    time.sleep(0.03)  # Minimal delay
-                except:
-                    pass
             
-            # If opponent specified, find matching game
-            if opponent and opponent != '':
+            for gid in game_ids:
+                gr = requests.get(f"{self.base_url}/games/{gid}", headers=headers, timeout=6)
+                if gr.status_code == 200:
+                    game_details[gid] = gr.json()["data"]
+                time.sleep(0.05)
+
+            # Opponent-specific check
+            if opponent:
                 opponent = self.normalize_opponent(opponent)
-                print(f"  🔍 Target: {opponent}")
-                
-                # Debug: show all games in the window
-                print(f"  📋 Available games:")
-                for i, game_stat in enumerate(games):
-                    game_id = game_stat.get('game', {}).get('id')
-                    game_date = game_stat.get('game', {}).get('date', '').split('T')[0]
-                    player_team = game_stat.get('team', {})
-                    player_abbr = player_team.get('abbreviation', '?')
+                for g in games:
+                    gid = g["game"]["id"]
+                    game = game_details.get(gid, {})
+                    if not game:
+                        continue
                     
-                    # Get full game details
-                    if game_id in game_details:
-                        full_game = game_details[game_id]
-                        home_team = full_game.get('home_team', {})
-                        visitor_team = full_game.get('visitor_team', {})
-                        home_abbr = home_team.get('abbreviation', '?')
-                        visitor_abbr = visitor_team.get('abbreviation', '?')
-                        
-                        if player_abbr == home_abbr:
-                            game_str = f"{player_abbr} vs {visitor_abbr}"
-                        else:
-                            game_str = f"{player_abbr} @ {home_abbr}"
-                        
-                        print(f"     [{i+1}] {game_date}: {game_str}")
-                    else:
-                        print(f"     [{i+1}] {game_date}: {player_abbr} (game details unavailable)")
-                
-                # Now match opponent
-                for game_stat in games:
-                    game_id = game_stat.get('game', {}).get('id')
-                    
-                    if game_id in game_details:
-                        full_game = game_details[game_id]
-                        home_team = full_game.get('home_team', {})
-                        visitor_team = full_game.get('visitor_team', {})
-                        player_team = game_stat.get('team', {})
-                        
-                        is_match, opp_team, location = self.match_opponent(home_team, visitor_team, opponent)
-                        
-                        if is_match:
-                            game_date = full_game.get('date', '').split('T')[0]
-                            player_abbr = player_team.get('abbreviation', 'TEAM')
-                            opp_abbr = opp_team.get('abbreviation', 'OPP')
-                            matchup = f"{player_abbr} {location} {opp_abbr}"
-                            
-                            print(f"  ✅ {matchup} ({game_date})")
-                            
-                            return {
-                                'PTS': game_stat.get('pts', 0) or 0,
-                                'REB': game_stat.get('reb', 0) or 0,
-                                'AST': game_stat.get('ast', 0) or 0,
-                                'FG3M': game_stat.get('fg3m', 0) or 0,
-                                'game_date': game_date,
-                                'matchup': matchup,
-                                'match_method': 'BallDontLie API',
-                                'days_old': (max_date.date() - datetime.strptime(game_date, '%Y-%m-%d').date()).days
-                            }
-                
-                print(f"  ❌ No game vs {opponent}")
+                    home = game.get("home_team", {}).get("abbreviation")
+                    away = game.get("visitor_team", {}).get("abbreviation")
+                    player_team = g.get("team", {}).get("abbreviation")
+
+                    if opponent in (home, away):
+                        matchup = f"{player_team} vs {away}" if player_team == home else f"{player_team} @ {home}"
+                        date = g["game"]["date"].split("T")[0]
+                        return {
+                            "PTS": g.get("pts", 0),
+                            "REB": g.get("reb", 0),
+                            "AST": g.get("ast", 0),
+                            "FG3M": g.get("fg3m", 0),
+                            "game_date": date,
+                            "matchup": matchup
+                        }
                 return None
-            
-            # No opponent - use most recent game
-            else:
-                # Sort by date to get most recent
-                games_sorted = sorted(games, key=lambda x: x.get('game', {}).get('date', ''), reverse=True)
-                most_recent = games_sorted[0]
-                
-                game_id = most_recent.get('game', {}).get('id')
-                game_date = most_recent.get('game', {}).get('date', '').split('T')[0]
-                player_team = most_recent.get('team', {})
-                player_abbr = player_team.get('abbreviation', 'TEAM')
-                
-                # Try to get full game details
-                if game_id in game_details:
-                    full_game = game_details[game_id]
-                    home_team = full_game.get('home_team', {})
-                    visitor_team = full_game.get('visitor_team', {})
-                    home_abbr = home_team.get('abbreviation', 'HOME')
-                    visitor_abbr = visitor_team.get('abbreviation', 'AWAY')
-                    
-                    if player_abbr == home_abbr:
-                        matchup = f"{player_abbr} vs {visitor_abbr}"
-                    else:
-                        matchup = f"{player_abbr} @ {home_abbr}"
-                else:
-                    matchup = f"{player_abbr} (opponent unknown)"
-                
-                print(f"  ⚠️ No opponent - recent: {matchup}")
-                
-                return {
-                    'PTS': most_recent.get('pts', 0) or 0,
-                    'REB': most_recent.get('reb', 0) or 0,
-                    'AST': most_recent.get('ast', 0) or 0,
-                    'FG3M': most_recent.get('fg3m', 0) or 0,
-                    'game_date': game_date,
-                    'matchup': matchup,
-                    'match_method': 'Most recent',
-                    'days_old': (max_date.date() - datetime.strptime(game_date, '%Y-%m-%d').date()).days
-                }
-                
+
+            # Most recent fallback
+            latest = sorted(games, key=lambda x: x["game"]["date"], reverse=True)[0]
+            date = latest["game"]["date"].split("T")[0]
+            home = latest["game"]["home_team"]["abbreviation"]
+            away = latest["game"]["visitor_team"]["abbreviation"]
+            team = latest["team"]["abbreviation"]
+            matchup = f"{team} vs {away}" if team == home else f"{team} @ {home}"
+            return {
+                "PTS": latest.get("pts", 0),
+                "REB": latest.get("reb", 0),
+                "AST": latest.get("ast", 0),
+                "FG3M": latest.get("fg3m", 0),
+                "game_date": date,
+                "matchup": matchup
+            }
+
         except Exception as e:
-            print(f"  ❌ Error: {str(e)}")
             return None
-    
-    def update_excel_with_results(self, max_date=None, days_window=7):
-        """
-        Process CSV and fetch stats
-        """
-        # Read file
-        if self.file_type == 'csv':
+
+
+    # -----------------------------------------------------------
+    def process_single_prop(self, row_data, target_date):
+        """Process a single prop bet (used for parallel processing)"""
+        i, player, stat, line, opponent = row_data
+        
+        result_data = {
+            'index': i,
+            'player': player,
+            'stat': stat,
+            'line': line,
+            'opponent': opponent,
+            'result': None,
+            'actual': None,
+            'game_date': None,
+            'matchup': None
+        }
+        
+        result = self.fetch_player_game_stats(player, opponent, target_date)
+        if result:
+            actual = result.get(stat, 0)
+            symbol = "✓" if actual > line else "✗"
+            result_data['result'] = symbol
+            result_data['actual'] = actual
+            result_data['game_date'] = result['game_date']
+            result_data['matchup'] = result['matchup']
+        else:
+            result_data['result'] = "⏳"
+            
+        return result_data
+
+    # -----------------------------------------------------------
+    def update_excel_with_results(self, target_date=None, parallel=True):
+        if self.file_type == "csv":
             df = pd.read_csv(self.file_path)
-            print(f"📁 CSV: {self.file_path}")
         else:
             df = pd.read_excel(self.file_path)
-            print(f"📁 Excel: {self.file_path}")
-        
-        print(f"🎯 Cutoff: {max_date.strftime('%B %d, %Y') if max_date else 'Today'}")
-        print(f"🔍 Window: {days_window} days\n")
-        
-        # Find opponent column
-        opponent_col = None
-        for col in df.columns:
-            if col.lower() == 'opponent':
-                opponent_col = col
-                break
-        
-        if opponent_col:
-            filled = df[opponent_col].notna() & (df[opponent_col] != '')
-            print(f"✅ Opponent column: '{opponent_col}' ({filled.sum()}/{len(df)} filled)\n")
-        
-        # Add result columns
-        new_columns = ['Actual_Stat', 'Hit_Miss', 'Result', 'Game_Date', 'Matchup', 'Match_Method', 'Days_Old']
-        for col in new_columns:
-            if col not in df.columns:
-                df[col] = ''
-        
-        print(f"Processing {len(df)} players...")
-        print("-" * 70)
-        
-        # Process each row
-        for idx, row in df.iterrows():
-            player_name = row['Player']
-            stat_type = row['Stat']
-            line = row['Line']
-            
-            opponent = None
-            if opponent_col:
-                opp_value = row[opponent_col]
-                if pd.notna(opp_value) and str(opp_value).strip() != '':
-                    opponent = str(opp_value).strip()
-            
-            print(f"\n{idx+1}. {player_name} - {stat_type} {line}")
-            if opponent:
-                print(f"   🎯 vs {opponent}", end=" ")
-            
-            stats = self.fetch_player_game_stats(
-                player_name,
-                opponent=opponent,
-                max_date=max_date,
-                days_window=days_window
-            )
-            
-            if stats:
-                actual_value = stats.get(stat_type, None)
+
+        if target_date is None:
+            target_date = datetime.now()
+
+        print(f"\n📅 Checking results for games around {target_date.strftime('%Y-%m-%d')}")
+        print(f"⚡ Mode: {'Parallel (Fast)' if parallel else 'Sequential'}\n")
+
+        if "Result" not in df.columns:
+            df["Result"] = ""
+
+        # Prepare row data
+        row_data_list = []
+        for i, row in df.iterrows():
+            player = row.get("Player")
+            stat = row.get("Stat")
+            line = float(row.get("Line", 0))
+            opponent = row.get("Opponent", None)
+            row_data_list.append((i, player, stat, line, opponent))
+
+        if parallel:
+            # Process in parallel for speed
+            results = []
+            with ThreadPoolExecutor(max_workers=5) as executor:
+                future_to_row = {
+                    executor.submit(self.process_single_prop, row_data, target_date): row_data 
+                    for row_data in row_data_list
+                }
                 
-                if actual_value is not None:
-                    df.at[idx, 'Actual_Stat'] = actual_value
-                    df.at[idx, 'Game_Date'] = stats.get('game_date', '')
-                    df.at[idx, 'Matchup'] = stats.get('matchup', '')
-                    df.at[idx, 'Match_Method'] = stats.get('match_method', '')
-                    df.at[idx, 'Days_Old'] = stats.get('days_old', '')
+                for future in as_completed(future_to_row):
+                    result_data = future.result()
+                    results.append(result_data)
                     
-                    if actual_value > line:
-                        df.at[idx, 'Hit_Miss'] = 'HIT'
-                        df.at[idx, 'Result'] = '✓'
-                        result = '✅'
+                    # Print result
+                    i = result_data['index']
+                    player = result_data['player']
+                    stat = result_data['stat']
+                    line = result_data['line']
+                    opponent = result_data['opponent']
+                    
+                    print(f"{i+1}. {player} — {stat} {line}", end="")
+                    if opponent:
+                        print(f" vs {opponent}", end="")
+                    
+                    if result_data['result'] == "⏳":
+                        print(" ⏳ Pending")
                     else:
-                        df.at[idx, 'Hit_Miss'] = 'MISS'
-                        df.at[idx, 'Result'] = '✗'
-                        result = '❌'
-                    
-                    print(f"  📊 {stat_type}: {actual_value} vs {line} {result}")
-                else:
-                    df.at[idx, 'Hit_Miss'] = 'ERROR'
-                    print(f"  ⚠️ Stat '{stat_type}' not available")
-            else:
-                df.at[idx, 'Actual_Stat'] = 'N/A'
-                df.at[idx, 'Hit_Miss'] = 'PENDING'
-                df.at[idx, 'Result'] = '⏳'
+                        print(f" → {result_data['actual']} {result_data['result']}")
             
-            time.sleep(0.1)  # Faster rate limiting
-        
-        # Save
-        base_name = os.path.splitext(self.file_path)[0]
-        if self.file_type == 'csv':
-            output_file = f"{base_name}_updated.csv"
+            # Update dataframe with results
+            for result_data in results:
+                i = result_data['index']
+                if result_data['actual'] is not None:
+                    df.at[i, "Actual"] = result_data['actual']
+                df.at[i, "Result"] = result_data['result']
+                if result_data['game_date']:
+                    df.at[i, "Game_Date"] = result_data['game_date']
+                if result_data['matchup']:
+                    df.at[i, "Matchup"] = result_data['matchup']
+        else:
+            # Sequential processing (original method)
+            for i, player, stat, line, opponent in row_data_list:
+                print(f"\n{i+1}. {player} — {stat} {line}")
+                if opponent:
+                    print(f"   🎯 vs {opponent}")
+
+                result = self.fetch_player_game_stats(player, opponent, target_date)
+                if result:
+                    actual = result.get(stat, 0)
+                    symbol = "✓" if actual > line else "✗"
+                    df.at[i, "Actual"] = actual
+                    df.at[i, "Result"] = symbol
+                    df.at[i, "Game_Date"] = result["game_date"]
+                    df.at[i, "Matchup"] = result["matchup"]
+                    print(f"   📊 {stat}: {actual} vs {line} {symbol}")
+                else:
+                    df.at[i, "Result"] = "⏳"
+                    print("   ⚠️ Pending or no data.")
+
+                time.sleep(0.1)
+
+        # Save updated file
+        base, ext = os.path.splitext(self.file_path)
+        output_file = f"{base}_updated{ext}"
+        if ext == ".csv":
             df.to_csv(output_file, index=False)
         else:
-            output_file = f"{base_name}_updated.xlsx"
             df.to_excel(output_file, index=False)
-        
-        print("\n" + "=" * 70)
-        print(f"✅ Saved: {output_file}\n")
-        
-        hits = (df['Hit_Miss'] == 'HIT').sum()
-        misses = (df['Hit_Miss'] == 'MISS').sum()
-        pending = (df['Hit_Miss'] == 'PENDING').sum()
-        
-        print(f"📊 RESULTS:")
-        print(f"   ✅ Hits: {hits}")
-        print(f"   ❌ Misses: {misses}")
-        print(f"   ⏳ Pending: {pending}")
-        
-        if hits + misses > 0:
-            hit_rate = hits / (hits + misses) * 100
-            print(f"\n🎯 HIT RATE: {hits}/{hits + misses} = {hit_rate:.1f}%")
-        
+
+        print(f"\n✅ Results updated and saved → {output_file}")
+
+        # Add summary automatically
+        self.add_summary_to_excel(output_file)
         return df
 
+    # -----------------------------------------------------------
+    def add_summary_to_excel(self, output_file):
+        """Append a summary section (Hits, Misses, Win %)"""
+        wb = load_workbook(output_file)
+        ws = wb.active
 
+        max_row = ws.max_row + 2
+        results = [cell.value for cell in ws["Result"] if cell.value in ["✓", "✗", "⏳"]]
+
+        hits = results.count("✓")
+        misses = results.count("✗")
+        pending = results.count("⏳")
+        total = hits + misses
+        win_pct = (hits / total * 100) if total > 0 else 0
+
+        ws.cell(row=max_row, column=1, value="Summary")
+        ws.cell(row=max_row + 1, column=1, value="Hits (✓)")
+        ws.cell(row=max_row + 1, column=2, value=hits)
+        ws.cell(row=max_row + 2, column=1, value="Misses (✗)")
+        ws.cell(row=max_row + 2, column=2, value=misses)
+        ws.cell(row=max_row + 3, column=1, value="Pending (⏳)")
+        ws.cell(row=max_row + 3, column=2, value=pending)
+        ws.cell(row=max_row + 4, column=1, value="Total Plays")
+        ws.cell(row=max_row + 4, column=2, value=total)
+        ws.cell(row=max_row + 5, column=1, value="Win %")
+        ws.cell(row=max_row + 5, column=2, value=f"{win_pct:.1f}%")
+
+        wb.save(output_file)
+        print(f"📊 Summary added → Hits: {hits}, Misses: {misses}, Win%: {win_pct:.1f}%\n")
+
+
+# ===============================================================
+# 🧩 MAIN
+# ===============================================================
 def main():
-    """Main execution"""
-    # ⬇️ SETTINGS ⬇️
-    API_KEY = "642d8995-44d0-4c58-b051-d32e72cf6036"  # Your BallDontLie API key
-    file_path = "export_prizepicks_with_opponent.csv"
-    
-    # For Nov 10, 2025 games, use cutoff of Nov 11, 2025
-    cutoff_date = datetime(2025, 11, 11)
-    days_window = 2  # Look back 2 days
-    
+    API_KEY = "642d8995-44d0-4c58-b051-d32e72cf6036"
+    file_path = "proppulse_results_20251111_114545.xlsx"
+    target_date = datetime(2025, 11, 11)
+
     print("=" * 70)
-    print("NBA PLAYER PROPS - BallDontLie API (REAL-TIME)")
+    print("🏀 PropPulse+ | NBA Results Checker — BallDontLie API")
     print("=" * 70)
-    print()
-    
+
     fetcher = NBAStatsFetcherBallDontLie(file_path, API_KEY)
-    
+    # Set parallel=True for fast processing, parallel=False for sequential
+    fetcher.update_excel_with_results(target_date=target_date, parallel=True)
+# ============================================================
+# ✅ Compatibility Wrapper for PropPulse+ v2025.4
+# ============================================================
+def fetch_player_logs(player_name, save_dir="data", refresh=False):
+    """
+    Wrapper for backward compatibility with prop_ev.py
+    Uses NBAStatsFetcherBallDontLie to fetch player game logs.
+    """
     try:
-        results_df = fetcher.update_excel_with_results(
-            max_date=cutoff_date,
-            days_window=days_window
-        )
-        
-        if results_df is not None:
-            print("\n✨ Complete!")
-        
-    except FileNotFoundError:
-        print(f"❌ File not found: {file_path}")
+        from nba_stats_fetcher import NBAStatsFetcherBallDontLie
+        fetcher = NBAStatsFetcherBallDontLie(file_path=save_dir, api_key=None)
+        return fetcher.fetch_player_game_stats(player_name)
     except Exception as e:
-        print(f"❌ Error: {str(e)}")
-        import traceback
-        traceback.print_exc()
-# =====================================================
-# 🌐 Compatibility Wrapper for PropPulse+ (v14)
-# =====================================================
-def fetch_player_data(player_name, api_key=None, days_window=20, save_dir="data"):
-    """
-    Compatibility wrapper for PropPulse EV model.
-    Returns recent player game data as a pandas DataFrame.
-    """
-    fetcher = NBAStatsFetcherBallDontLie(file_path="dummy.csv", api_key=api_key or "")
-    result = fetcher.fetch_player_game_stats(player_name, days_window=days_window)
-    
-    if result:
-        df = pd.DataFrame([result])
-        return df
-    else:
-        return pd.DataFrame()
+        print(f"[Wrapper] ❌ Failed to fetch logs for {player_name}: {e}")
+        return None
 
 
 if __name__ == "__main__":
