@@ -2,7 +2,7 @@ streamlit
 pandas
 numpy
 requests
-plotly
+plotly>=5.0.0
 openpyxl
 scipy
 python-dateutil
