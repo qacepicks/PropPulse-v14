@@ -970,7 +970,6 @@ with tab2:
 # TAB 3: BATCH ANALYSIS (Multi-Prop)
 # ==========================================
 with tab3:
-    render_header()
     st.markdown("### 📊 Batch Prop Analyzer")
     st.caption(
         "Upload a CSV or Excel file containing player props to analyze multiple lines automatically."
@@ -1041,7 +1040,6 @@ with tab3:
 # TAB 4: CSV IMPORT / VIEWER
 # ==========================================
 with tab4:
-    render_header()
     st.markdown("### 📁 Import or Preview Any Local CSV File")
 
     file = st.file_uploader(
@@ -1066,7 +1064,6 @@ with tab4:
 # TAB 5: PROP COMPARISON TOOL
 # ==========================================
 with tab5:
-    render_header()
     st.markdown("### ⚖️ Prop Comparison — Compare Two Player Lines")
 
     c1, c2 = st.columns(2)
