@@ -1,1160 +1,1144 @@
+#!/usr/bin/env python3
 """
 PropPulse+ v2025.6 — Professional NBA Prop Analyzer
-Combined: Analysis Tools + Live Sheet Viewer
-Mobile-Optimized UI | Blue–Red Theme | Multi-Tab Interface
+Advanced L20-weighted projection + DvP + auto position detection
+Clean, professional CLI interface with enhanced visuals
 """
 
-import os, io, base64, re
+import os
+import sys
+import time
+import math
+import json
+import platform
 from datetime import datetime, timedelta, timezone
-from contextlib import redirect_stdout
+from typing import Optional, Dict, List, Any
 
-import streamlit as st
-import pandas as pd
 import numpy as np
-import plotly.graph_objects as go
+import pandas as pd
+import requests
+from scipy.stats import norm
+import pytz
+
+from dvp_updater import load_dvp_data
+from nba_stats_fetcher import fetch_player_logs
+from nba_api.stats.static import teams as nba_teams, players as nba_players
+from nba_api.stats.endpoints import commonplayerinfo
 
 # ===============================
-# 🔗 Google Sheets config (Live EV Board)
+# 🎨 TERMINAL COLORS & FORMATTING
 # ===============================
-SHEET_ID = "1SHuoEg331k_dcrgBoc7y8gWbgw1QTKHFJRzzNRqiOnE"
-SHEET_GID = "1954146299"  # the worksheet/tab you're using
-SHEET_CSV_URL = (
-    f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export"
-    f"?format=csv&gid={SHEET_GID}"
-)
 
-# =============================
-# 🔒 ADMIN CONFIG (Private Use)
-# =============================
-ADMIN_CODE = "qace"
+class Colors:
+    """ANSI color codes for terminal output"""
+    HEADER = '\033[95m'
+    BLUE = '\033[94m'
+    CYAN = '\033[96m'
+    GREEN = '\033[92m'
+    YELLOW = '\033[93m'
+    RED = '\033[91m'
+    BOLD = '\033[1m'
+    UNDERLINE = '\033[4m'
+    END = '\033[0m'
+    GRAY = '\033[90m'
+    
+    # Custom gradients
+    ELITE = '\033[38;2;16;185;129m'  # Green
+    SOLID = '\033[38;2;59;130;246m'  # Blue
+    NEUTRAL = '\033[38;2;156;163;175m'  # Gray
+    FADE = '\033[38;2;239;68;68m'  # Red
 
-# ============
-# Model import
-# ============
+def clear_screen():
+    """Clear terminal screen"""
+    os.system('cls' if platform.system() == 'Windows' else 'clear')
+
+def print_header(text: str, char: str = "═"):
+    """Print formatted header"""
+    width = 70
+    print(f"\n{Colors.BLUE}{char * width}{Colors.END}")
+    print(f"{Colors.BOLD}{Colors.CYAN}{text.center(width)}{Colors.END}")
+    print(f"{Colors.BLUE}{char * width}{Colors.END}\n")
+
+def print_section(text: str):
+    """Print section divider"""
+    print(f"\n{Colors.GRAY}{'─' * 70}{Colors.END}")
+    print(f"{Colors.BOLD}{text}{Colors.END}")
+    print(f"{Colors.GRAY}{'─' * 70}{Colors.END}")
+
+def print_metric(label: str, value: Any, color: str = Colors.CYAN):
+    """Print formatted metric"""
+    print(f"  {Colors.GRAY}•{Colors.END} {Colors.BOLD}{label}:{Colors.END} {color}{value}{Colors.END}")
+
+def print_success(msg: str):
+    """Print success message"""
+    print(f"{Colors.GREEN}✓{Colors.END} {msg}")
+
+def print_warning(msg: str):
+    """Print warning message"""
+    print(f"{Colors.YELLOW}⚠{Colors.END} {msg}")
+
+def print_error(msg: str):
+    """Print error message"""
+    print(f"{Colors.RED}✗{Colors.END} {msg}")
+
+def print_info(msg: str):
+    """Print info message"""
+    print(f"{Colors.BLUE}ℹ{Colors.END} {msg}")
+
+# ===============================
+# 🔧 CONFIGURATION
+# ===============================
+
+DATA_PATH_DEFAULT = "data/"
+
+STAT_MAP = {
+    "PTS": "PTS",
+    "REB": "REB",
+    "AST": "AST",
+    "FG3M": "FG3M",
+    "PRA": ["PTS", "REB", "AST"],
+    "REB+AST": ["REB", "AST"],
+    "PTS+REB": ["PTS", "REB"],
+    "PTS+AST": ["PTS", "AST"],
+    "RA": ["REB", "AST"],
+    "PR": ["PTS", "REB"],
+    "PA": ["PTS", "AST"],
+    "P+R": ["PTS", "REB"],
+    "P+A": ["PTS", "AST"],
+}
+
+def load_tuned_config(path="proppulse_config_latest.json") -> Dict:
+    """Load tuned configuration parameters"""
+    if not os.path.exists(path):
+        print_info(f"Tuned config not found: {path}")
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        cfg = json.load(f)
+    print_success(f"Loaded tuned parameters from {path}")
+    return cfg
+
+CONFIG_TUNED = load_tuned_config()
+
+# Default calibration constants
 try:
-    import prop_ev as pe
-except ImportError as e:
-    st.error(f"❌ Failed to import prop_ev.py: {e}")
-    st.stop()
-
-# =============
-# Page settings
-# =============
-st.set_page_config(
-    page_title="PropPulse+ | NBA Props",
-    page_icon="🏀",
-    layout="wide",
-    initial_sidebar_state="expanded",
-)
-
-# 🔗 LOCAL DATA CONFIG (for Live Slate manual upload)
-DATA_DIR = "data"
-LATEST_FILE = os.path.join(DATA_DIR, "latest_props.xlsx")
-
-
-def cleanup_old_results():
-    """Keep only latest_props.xlsx and all player logs (CSV); delete older .xlsx results."""
-    if not os.path.exists(DATA_DIR):
-        return
-    for f in os.listdir(DATA_DIR):
-        if f.endswith(".xlsx") and f != "latest_props.xlsx":
-            try:
-                os.remove(os.path.join(DATA_DIR, f))
-            except Exception:
-                pass
-
-
-# =========
-# Logo util
-# =========
-def _logo_b64():
-    path = "proppulse_logo.png"
-    if os.path.exists(path):
-        with open(path, "rb") as f:
-            return base64.b64encode(f.read()).decode()
-    return None
-
-
-logo_b64 = _logo_b64()
-logo_html = (
-    f'<img src="data:image/png;base64,{logo_b64}" style="width:56px;height:56px;border-radius:12px;">'
-    if logo_b64
-    else '<div class="brand-logo-fallback">PP</div>'
-)
-
-# ======================
-# Global color variables
-# ======================
-PRIMARY = "#2563EB"
-PRIMARY_DARK = "#1E40AF"
-PRIMARY_LIGHT = "#60A5FA"
-ACCENT = "#EF4444"
-ACCENT_DARK = "#B91C1C"
-TEXT_PRIMARY = "#F9FAFB"
-TEXT_SECONDARY = "#E5E7EB"
-TEXT_MUTED = "#9CA3AF"
-SURFACE = "#111827"
-SURFACE_2 = "#1F2937"
-BORDER = "#374151"
-
-# =========
-# Global CSS
-# =========
-st.markdown(
-    f"""
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700;800;900&display=swap');
-
-:root {{
-  --primary:{PRIMARY};
-  --primary-dark:{PRIMARY_DARK};
-  --primary-light:{PRIMARY_LIGHT};
-  --accent:{ACCENT};
-  --accent-dark:{ACCENT_DARK};
-  --bg:{SURFACE};
-  --surface:{SURFACE_2};
-  --text:{TEXT_PRIMARY};
-  --text-2:{TEXT_SECONDARY};
-  --muted:{TEXT_MUTED};
-  --border:{BORDER};
-}}
-
-.stApp {{
-  background: var(--bg);
-  font-family: 'Inter', sans-serif;
-  color: var(--text-2);
-  overflow-x: hidden !important;
-}}
-#MainMenu, footer, header {{ visibility: hidden; }}
-
-[data-testid="stSidebar"] {{
-  background: var(--surface);
-  border-right: 2px solid var(--primary);
-  overflow-y: auto;
-}}
-[data-testid="stSidebar"] * {{ color: var(--text-2) !important; }}
-[data-testid="stSidebar"] label {{
-  font-weight: 700; font-size: 12px; text-transform: uppercase;
-  letter-spacing: 1px; margin-bottom: 6px;
-}}
-
-.stTabs [data-baseweb="tab-list"] {{
-  gap: 8px;
-  background: var(--surface);
-  border-radius: 12px;
-  padding: 8px;
-}}
-.stTabs [data-baseweb="tab"] {{
-  background: transparent;
-  border-radius: 8px;
-  color: var(--text-2);
-  font-weight: 600;
-  padding: 12px 24px;
-}}
-.stTabs [aria-selected="true"] {{
-  background: linear-gradient(135deg, var(--primary), var(--accent));
-  color: white !important;
-}}
-
-.main-header {{
-  background: linear-gradient(135deg, var(--surface), var(--bg));
-  border-bottom: 2px solid var(--primary);
-  padding: 1.2rem 1rem; box-shadow: 0 8px 24px rgba(0,0,0,.4);
-}}
-.brand-container {{ display: flex; align-items: center; justify-content: space-between; gap: 1rem; flex-wrap: wrap; }}
-.brand-logo-fallback {{
-  width: 56px; height: 56px; background: linear-gradient(135deg, var(--primary), var(--accent));
-  border-radius: 12px; display: flex; align-items: center; justify-content: center;
-  font-weight: 900; font-size: 26px; color: white;
-}}
-.brand-title {{
-  font-size: 28px; font-weight: 900;
-  background: linear-gradient(135deg, var(--primary), var(--accent));
-  -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-}}
-.brand-subtitle {{ font-size: 13px; color: var(--muted); }}
-.status-badge {{
-  background: rgba(16, 185, 129, .12); border: 2px solid #10B981; color: #10B981;
-  padding: 6px 12px; border-radius: 8px; font-size: 12px; font-weight: 700;
-}}
-
-.stTextInput input, .stNumberInput input, .stSelectbox select {{
-  background: var(--surface); border: 2px solid var(--border);
-  border-radius: 10px; color: var(--text); padding: 12px 14px; font-size: 15px;
-}}
-.stTextInput input:focus, .stNumberInput input:focus, .stSelectbox select:focus {{
-  border-color: var(--primary);
-  box-shadow: 0 0 8px rgba(37, 99, 235, 0.35);
-  outline: none;
-}}
-
-[data-testid="stDateInput"] input {{
-  background-color: var(--surface) !important;
-  border: 2px solid var(--border) !important;
-  color: var(--text) !important;
-  border-radius: 10px !important;
-  padding: 10px 12px !important;
-  font-size: 15px !important;
-}}
-[data-testid="stDateInput"] label {{
-  font-weight: 700 !important; font-size: 12px !important; text-transform: uppercase !important;
-  letter-spacing: 1px !important; margin-bottom: 6px !important; color: var(--text-2) !important;
-}}
-[data-testid="stDateInput"] input:hover, [data-testid="stDateInput"] input:focus {{
-  border-color: var(--primary) !important;
-  box-shadow: 0 0 8px rgba(37, 99, 235, 0.35) !important;
-  outline: none !important; transition: 0.25s ease-in-out !important;
-}}
-
-.stButton>button {{
-  width: 100%;
-  background: linear-gradient(135deg, var(--primary), var(--accent));
-  border-radius: 10px; padding: 14px 24px; font-weight: 800; text-transform: uppercase;
-  box-shadow: 0 6px 20px rgba(37, 99, 235, 0.35);
-  color: white;
-}}
-.stButton>button:hover {{
-  transform: translateY(-2px);
-  box-shadow: 0 8px 28px rgba(239, 68, 68, 0.45);
-}}
-
-.metric-grid {{ display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: 16px; margin: 24px 0; }}
-.metric-card {{
-  background: var(--surface); border-radius: 12px; border: 1.5px solid var(--border);
-  padding: 18px; transition: .3s;
-}}
-.metric-card:hover {{ border-color: var(--primary); transform: translateY(-3px); }}
-.metric-value {{ font-size: 28px; font-weight: 900; color: var(--text); }}
-
-.ev-container {{
-  margin-top: 12px; background: linear-gradient(135deg, rgba(37,99,235,.08), rgba(239,68,68,.08));
-  border: 1px solid var(--border); border-radius: 12px; padding: 16px;
-}}
-.ev-badge {{ display: inline-block; font-weight: 900; padding: 6px 10px; border-radius: 8px; margin-right: 10px; }}
-.ev-positive {{ background: rgba(16, 185, 129, .15); color: #10B981; border: 1px solid #10B981; }}
-.ev-negative {{ background: rgba(239, 68, 68, .15); color: var(--accent); border: 1px solid var(--accent); }}
-.recommendation {{ display: inline-block; font-weight: 800; color: var(--text-2); }}
-
-.footer {{
-  text-align:center; padding:30px 0; font-size:13px; color: var(--muted);
-  border-top:1px solid var(--border); margin-top:40px;
-}}
-.footer strong {{ color: var(--primary) !important; }}
-
-@media (max-width: 768px) {{
-  .brand-title {{ font-size: 22px; }}
-  .metric-grid {{ grid-template-columns: 1fr; }}
-  .stAppViewContainer {{ padding: 0 .5rem !important; }}
-  .stButton>button {{ font-size: 14px; padding: 12px 20px; }}
-  .ev-container {{ padding: 16px; }}
-}}
-</style>
-""",
-    unsafe_allow_html=True,
-)
-
-# ======
-# Header
-# ======
-def render_header(is_admin: bool = False):
-    """Render header with optional Admin badge."""
-    admin_badge_html = ""
-    if is_admin:
-        admin_badge_html = """
-        <div class="status-badge" style="background: rgba(16,185,129,.15);
-             border: 2px solid #10B981; color:#10B981; margin-left:10px;">
-             🧠 ADMIN MODE
-        </div>
-        """
-
-    st.markdown(
-        f"""
-        <div class="main-header">
-          <div class="brand-container">
-            {logo_html}
-            <div class="brand-text">
-              <div class="brand-title">PropPulse+</div>
-              <div class="brand-subtitle">Advanced NBA Player Prop Analytics Platform</div>
-            </div>
-            <div style="display:flex;align-items:center;gap:10px;">
-              <div class="status-badge">LIVE</div>
-              {admin_badge_html}
-            </div>
-          </div>
-        </div>
-        """,
-        unsafe_allow_html=True,
+    from calibration import (
+        TEMP_Z, BALANCE_BIAS, CLIP_MIN, CLIP_MAX,
+        MULT_CENTER, MULT_MAX_DEV, EMP_PRIOR_K, W_EMP_MAX,
+        INCLUDE_LAST_SEASON, SHRINK_TO_LEAGUE,
     )
+except Exception:
+    TEMP_Z = 1.05
+    BALANCE_BIAS = 0.10
+    CLIP_MIN, CLIP_MAX = 0.08, 0.92
+    MULT_CENTER, MULT_MAX_DEV = 1.0, 0.25
+    EMP_PRIOR_K, W_EMP_MAX = 20, 0.30
+    INCLUDE_LAST_SEASON = True
+    SHRINK_TO_LEAGUE = 0.10
 
+# ===============================
+# ⚙️ SETTINGS MANAGEMENT
+# ===============================
 
-# ==========================================
-# HELPER FUNCTIONS FOR LIVE SHEET
-# ==========================================
-def to_csv_url(url: str, gid: int | None = None) -> str:
-    """Convert Google Sheets publish or edit URL to CSV endpoint."""
-    if "output=csv" in url:
-        return url
-    if "pubhtml" in url:
-        base = url.split("/pubhtml")[0]
-        if gid is not None:
-            return f"{base}/pub?gid={gid}&single=true&output=csv"
-        return f"{base}/pub?output=csv"
-    if "docs.google.com/spreadsheets" in url and "output=" not in url:
-        sep = "&" if "?" in url else "?"
-        if gid is not None and "gid=" not in url:
-            url = f"{url}{sep}gid={gid}"
-            sep = "&"
-        return f"{url}{sep}output=csv"
-    return url
-
-
-@st.cache_data(ttl=120, show_spinner=False)
-def load_sheet(sheet_url: str, gid: int | None = None) -> pd.DataFrame:
-    """Load Google Sheet, try CSV first then HTML fallback."""
-    csv_url = to_csv_url(sheet_url, gid)
-    try:
-        df = pd.read_csv(csv_url)
-    except Exception:
-        try:
-            tables = pd.read_html(sheet_url)
-            if not tables:
-                raise ValueError("No tables found in published sheet HTML")
-            df = tables[0]
-        except Exception as e:
-            raise RuntimeError(f"Failed to fetch Google Sheet. Error: {e}")
-
-    df.columns = [re.sub(r"\s+", " ", str(c)).strip() for c in df.columns]
-
-    # Column renames to normalize your sheet format
-    ren = {
-        "Ev": "EV",
-        "Edge": "EV",
-        "EV¢": "EV",  # your sheet uses EV¢
-        "Confidence %": "Confidence",
-        "Conf": "Confidence",
-        "Opponent Team": "Opponent",
-        "Games": "Games Analyzed",
-        "GamesAnalyzed": "Games Analyzed",
+def load_settings() -> Dict:
+    """Load or create settings.json"""
+    default = {
+        "default_sportsbook": "Fliff",
+        "default_region": "us",
+        "data_path": DATA_PATH_DEFAULT,
+        "injury_api_key": "YOUR_SPORTSDATAIO_KEY",
+        "balldontlie_api_key": "free",
+        "cache_hours": 24,
     }
-    for k, v in ren.items():
-        if k in df.columns and v not in df.columns:
-            df.rename(columns={k: v}, inplace=True)
+    path = "settings.json"
+    
+    if not os.path.exists(path):
+        with open(path, "w") as f:
+            json.dump(default, f, indent=4)
+        print_success("Created new settings.json with defaults")
+        return default
 
-    return df
+    with open(path, "r") as f:
+        settings = json.load(f)
 
+    for k, v in default.items():
+        if k not in settings:
+            settings[k] = v
 
-def coerce_numeric(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
-    """Convert specified columns to numeric."""
-    for c in cols:
-        if c in df.columns:
-            df[c] = pd.to_numeric(df[c], errors="coerce")
-    return df
+    os.makedirs(settings["data_path"], exist_ok=True)
+    return settings
 
+# ===============================
+# 📡 BALLDONTLIE API WRAPPER
+# ===============================
 
-def summarize_results(df: pd.DataFrame, result_col: str = "Result") -> dict:
-    """Count results and compute win rate."""
-    if result_col not in df.columns:
-        return {"wins": 0, "losses": 0, "close": 0, "total": 0, "win_rate": 0.0}
-    series = df[result_col].astype(str).str.strip()
-    wins = (series == "✓").sum()
-    losses = (series == "✗").sum()
-    close = (series == "⚠️").sum() + (series == "⚠").sum()
-    total = wins + losses + close
-    win_rate = (wins / total * 100.0) if total > 0 else 0.0
-    return {"wins": wins, "losses": losses, "close": close, "total": total, "win_rate": win_rate}
+def get_bdl(endpoint: str, params: Optional[Dict] = None, 
+            settings: Optional[Dict] = None, timeout: int = 10) -> Optional[Dict]:
+    """Fetch data from BallDontLie API"""
+    base_url = "https://api.balldontlie.io/v1"
+    if settings is None:
+        settings = {"balldontlie_api_key": "free"}
+    api_key = settings.get("balldontlie_api_key", "free")
 
+    headers = {}
+    if api_key and api_key.lower() != "free" and api_key != "YOUR_BALLDONTLIE_KEY":
+        headers["Authorization"] = f"Bearer {api_key}"
 
-def drop_alt_lines(df: pd.DataFrame) -> pd.DataFrame:
-    """Filter out alternate lines (0.5, 1.5, 2.5, etc.)."""
-    if "Line" not in df.columns:
-        return df
-
-    def is_half(x):
-        try:
-            val = float(x)
-            frac = abs(val - round(val))
-            return abs(frac - 0.5) < 1e-9
-        except Exception:
-            return False
-
-    mask = ~df["Line"].apply(is_half)
-    return df[mask]
-
-
-def color_ev(val):
-    """Style function for EV column."""
+    url = f"{base_url}{endpoint}"
+    params = params or {}
+    
     try:
-        v = float(val)
+        r = requests.get(url, headers=headers, params=params, timeout=timeout)
+        if r.status_code == 200:
+            data = r.json()
+            return data
+        if r.status_code in (401, 403, 404, 429):
+            print_warning(f"BDL API returned {r.status_code}")
+            return None
+        return None
+    except Exception as e:
+        print_error(f"BDL request failed: {e}")
+        return None
+
+# ===============================
+# 📊 DVP DATA LOADING
+# ===============================
+
+try:
+    dvp_data = load_dvp_data()
+except Exception as e:
+    print_warning(f"Failed to load DvP: {e}")
+    dvp_data = {}
+
+# ===============================
+# 🔍 POSITION DETECTION
+# ===============================
+
+TEAM_MAP = {
+    "ATLANTA HAWKS": "ATL", "BOSTON CELTICS": "BOS", "BROOKLYN NETS": "BKN",
+    "CHARLOTTE HORNETS": "CHA", "CHICAGO BULLS": "CHI", "CLEVELAND CAVALIERS": "CLE",
+    "DALLAS MAVERICKS": "DAL", "DENVER NUGGETS": "DEN", "DETROIT PISTONS": "DET",
+    "GOLDEN STATE WARRIORS": "GSW", "HOUSTON ROCKETS": "HOU", "INDIANA PACERS": "IND",
+    "LOS ANGELES CLIPPERS": "LAC", "LOS ANGELES LAKERS": "LAL", "MEMPHIS GRIZZLIES": "MEM",
+    "MIAMI HEAT": "MIA", "MILWAUKEE BUCKS": "MIL", "MINNESOTA TIMBERWOLVES": "MIN",
+    "NEW ORLEANS PELICANS": "NOP", "NEW YORK KNICKS": "NYK", "OKLAHOMA CITY THUNDER": "OKC",
+    "ORLANDO MAGIC": "ORL", "PHILADELPHIA 76ERS": "PHI", "PHOENIX SUNS": "PHX",
+    "PORTLAND TRAIL BLAZERS": "POR", "SACRAMENTO KINGS": "SAC", "SAN ANTONIO SPURS": "SAS",
+    "TORONTO RAPTORS": "TOR", "UTAH JAZZ": "UTA", "WASHINGTON WIZARDS": "WAS"
+}
+
+def normalize_position(pos: str) -> str:
+    """Normalize position abbreviations"""
+    pos = (pos or "").upper().strip()
+    mapping = {
+        "G": "SG", "G-F": "SF", "F": "SF", "F-G": "SF",
+        "F-C": "PF", "C-F": "C",
+    }
+    return mapping.get(pos, pos)
+
+def infer_position_from_stats(df_logs: pd.DataFrame) -> str:
+    """Infer player position from statistical profile"""
+    def avg(col):
+        if col not in df_logs.columns:
+            return 0.0
+        return pd.to_numeric(df_logs[col], errors="coerce").fillna(0).mean()
+
+    a_pts = avg("PTS")
+    a_reb = avg("REB")
+    a_ast = avg("AST")
+    a_fg3 = avg("FG3M")
+
+    if a_ast >= 6.5:
+        return "PG"
+    if a_reb >= 9 and a_fg3 < 1.0:
+        return "C"
+    if a_reb >= 7.5 and a_ast < 5.5:
+        return "PF"
+    if 4.5 <= a_reb <= 8 and 3 <= a_ast <= 6 and a_pts >= 12:
+        return "SF"
+    if a_ast >= 3 and a_reb < 5.5 and (a_fg3 >= 1.5 or a_pts >= 15):
+        return "SG"
+    if a_reb >= 7:
+        return "PF"
+    if a_reb >= 5:
+        return "SF"
+    return "SG"
+
+def get_player_position_auto(player_name: str, df_logs: Optional[pd.DataFrame], 
+                            settings: Optional[Dict] = None) -> str:
+    """Auto-detect player position using BDL API and statistical inference"""
+    try:
+        last_name = player_name.split()[-1]
+        data = get_bdl("/players", {"search": last_name}, settings)
+        if data and data.get("data"):
+            for p in data["data"]:
+                full = f"{p.get('first_name','')} {p.get('last_name','')}".strip()
+                if full.lower() == player_name.lower():
+                    pos = normalize_position(p.get("position", ""))
+                    if pos:
+                        return pos
+            first = data["data"][0]
+            pos = normalize_position(first.get("position", ""))
+            if pos:
+                return pos
+    except Exception as e:
+        print_warning(f"BDL position lookup failed: {e}")
+
+    if df_logs is not None and len(df_logs) > 0:
+        pos = infer_position_from_stats(df_logs)
+        return pos
+
+    return "SF"
+
+# ===============================
+# 🕒 OPPONENT DETECTION
+# ===============================
+
+def get_live_opponent_from_schedule(player_name: str, settings: Optional[Dict] = None) -> str:
+    """Get opponent from today's NBA schedule"""
+    try:
+        pinfo = next(
+            (p for p in nba_players.get_players() if p["full_name"].lower() == player_name.lower()),
+            None,
+        )
+        if not pinfo:
+            return "N/A"
+
+        info = commonplayerinfo.CommonPlayerInfo(player_id=pinfo["id"]).get_data_frames()[0]
+        team_abbr = info.loc[0, "TEAM_ABBREVIATION"]
+
+        url = "https://cdn.nba.com/static/json/liveData/scoreboard/todaysScoreboard_00.json"
+        r = requests.get(url, timeout=8)
+        games = r.json().get("scoreboard", {}).get("games", [])
+
+        for g in games:
+            home = g["homeTeam"]["teamTricode"]
+            away = g["awayTeam"]["teamTricode"]
+            if team_abbr == home:
+                return away
+            if team_abbr == away:
+                return home
+        return "N/A"
     except Exception:
-        return ""
-    if v > 0:
-        return "background-color: rgba(52,199,89,0.12); color: #caf7d2;"
-    if v < 0:
-        return "background-color: rgba(229,83,83,0.10); color: #ffd6d6;"
-    return ""
+        return "N/A"
 
+def get_upcoming_opponent_abbr(player_name: str, settings: Optional[Dict] = None) -> tuple:
+    """Get next opponent from upcoming schedule"""
+    try:
+        last_name = player_name.split()[-1]
+        player_data = get_bdl("/players", {"search": last_name}, settings)
+        if not player_data or not player_data.get("data"):
+            return None, None
 
-# =================
-# MAIN TAB SELECTOR
-# =================
-tab1, tab2, tab3, tab4, tab5 = st.tabs(
-    [
-        "🎯 Analysis Tools",
-        "💎 Live Slate",
-        "📊 Batch Analysis",
-        "📁 CSV Import",
-        "⚖️ Prop Comparison",
-    ]
-)
+        player_match = None
+        for p in player_data["data"]:
+            full = f"{p.get('first_name','')} {p.get('last_name','')}".strip()
+            if full.lower() == player_name.lower():
+                player_match = p
+                break
+        if not player_match:
+            player_match = player_data["data"][0]
 
-# ==========================================
-# TAB 1: ANALYSIS TOOLS
-# ==========================================
-with tab1:
-    render_header()
+        player_id = player_match.get("id")
+        bdl_team_abbr = player_match.get("team", {}).get("abbreviation", "UNK")
+        team_abbr = bdl_team_abbr
 
-    with st.sidebar:
-        st.markdown("### ⚙️ Analysis Settings")
-        st.markdown("---")
-
-        with st.expander("🔧 Advanced Settings"):
-            debug_mode = st.checkbox("Enable Debug Mode", value=True)
-            show_charts = st.checkbox("Show Visualizations", value=True)
-
-    with st.form("prop_analyzer"):
-        st.markdown("### 📋 Enter Prop Details")
-
-        c1, c2 = st.columns([2, 1])
-        player = c1.text_input("Player Name", placeholder="LeBron James")
-        stat = c2.selectbox(
-            "Stat Category",
-            ["PTS", "REB", "AST", "REB+AST", "PRA", "P+R", "P+A", "FG3M"],
+        from dateutil import parser
+        today = datetime.now().date()
+        future = today + timedelta(days=7)
+        games_data = get_bdl(
+            "/games",
+            {"player_ids[]": player_id, "start_date": str(today), "end_date": str(future)},
+            settings,
         )
+        
+        if not games_data or not games_data.get("data"):
+            return None, team_abbr
 
-        cdate = st.columns([1])[0]
-        analysis_date = cdate.date_input(
-            "📅 Analysis Date",
-            value=datetime.now(),
-            min_value=datetime.now() - timedelta(days=7),
-            max_value=datetime.now() + timedelta(days=7),
-            help="Select the date for opponent/schedule lookup.",
-        )
+        games = sorted(games_data["data"], key=lambda x: parser.parse(x["date"]).date())
 
-        c3, c4 = st.columns(2)
-        line = c3.number_input("Line", 0.0, 100.0, 25.5, 0.5)
-        odds = c4.number_input("Odds (American)", value=-110, step=5)
+        next_game = None
+        for g in games:
+            g_date = parser.parse(g["date"]).date()
+            if g_date >= today:
+                next_game = g
+                break
+        
+        if not next_game:
+            return None, team_abbr
 
-        st.markdown("---")
-        submitted = st.form_submit_button("🔍 ANALYZE PROP", use_container_width=True)
+        home = next_game.get("home_team", {})
+        away = next_game.get("visitor_team", {})
+        player_team_id = player_match.get("team", {}).get("id")
 
-    if submitted:
-        if not player.strip():
-            st.error("⚠️ Please enter a player name")
-            st.stop()
-
-        try:
-            settings = pe.load_settings()
-        except Exception as e:
-            st.error(f"❌ Failed to load settings: {e}")
-            st.stop()
-
-        analysis_date_str = analysis_date.strftime("%Y-%m-%d")
-        st.info(f"📅 Analyzing for date: **{analysis_date_str}**")
-
-        with st.spinner(f"🏀 Analyzing {player}'s {stat} projection..."):
-            try:
-                settings["analysis_date"] = analysis_date_str
-                buf = io.StringIO()
-                with redirect_stdout(buf):
-                    result = pe.analyze_single_prop(
-                        player,
-                        stat,
-                        float(line),
-                        int(odds),
-                        settings=settings,
-                        debug_mode=debug_mode,
-                    )
-                debug_text = buf.getvalue()
-                if not result:
-                    st.error("❌ Unable to analyze this prop.")
-                    st.stop()
-            except Exception as e:
-                st.error(f"❌ Analysis Error: {e}")
-                st.stop()
-
-        p_model = result["p_model"]
-        p_book = result["p_book"]
-        ev = result["ev"]
-        projection = result["projection"]
-        n_games = result["n_games"]
-        opponent = result.get("opponent", "N/A")
-        position = result.get("position", "N/A")
-        dvp_mult = result.get("dvp_mult", 1.0)
-        confidence = result.get("confidence", 0.0)
-        grade = result.get("grade", "N/A")
-
-        edge = (p_model - p_book) * 100
-        ev_cents = ev * 100
-        recommendation = "OVER" if projection > line else "UNDER"
-
-        st.success("✅ Analysis Complete!")
-
-        st.markdown('<div class="metric-grid">', unsafe_allow_html=True)
-        mc1, mc2, mc3, mc4 = st.columns(4)
-        mc1.markdown(
-            f"<div class='metric-card'><div class='metric-value'>{projection:.1f}</div><div>Model Projection</div></div>",
-            unsafe_allow_html=True,
-        )
-        mc2.markdown(
-            f"<div class='metric-card'><div class='metric-value'>{ev_cents:+.1f}¢</div><div>Expected Value</div></div>",
-            unsafe_allow_html=True,
-        )
-        mc3.markdown(
-            f"<div class='metric-card'><div class='metric-value'>{edge:+.1f}%</div><div>Model Edge</div></div>",
-            unsafe_allow_html=True,
-        )
-        mc4.markdown(
-            f"<div class='metric-card'><div class='metric-value'>{confidence:.2f}</div><div>Confidence</div></div>",
-            unsafe_allow_html=True,
-        )
-        st.markdown("</div>", unsafe_allow_html=True)
-
-        ev_class = "ev-positive" if ev > 0 else "ev-negative"
-        rec_text = f"BET {recommendation}" if ev > 0 else "FADE THIS PROP"
-        st.markdown(
-            f"<div class='ev-container'><span class='ev-badge {ev_class}'>{ev_cents:+.1f}¢ EV</span>"
-            f"<span class='recommendation'>{rec_text}</span></div>",
-            unsafe_allow_html=True,
-        )
-
-        cL, cR = st.columns(2)
-        cL.markdown(
-            f"**Model Prob:** {p_model*100:.1f}%  \n"
-            f"**Book Prob:** {p_book*100:.1f}%  \n"
-            f"**Line:** {line}  \n"
-            f"**Odds:** {odds}"
-        )
-        cR.markdown(
-            f"**Opponent:** {opponent}  \n"
-            f"**Position:** {position}  \n"
-            f"**DvP Multiplier:** {dvp_mult:.3f}  \n"
-            f"**Sample Size:** {n_games}"
-        )
-
-        if show_charts:
-            st.markdown("---")
-            st.markdown("### 📈 Visual Analysis")
-
-            col1, col2 = st.columns(2)
-
-            with col1:
-                st.markdown("#### 🎯 Win Probability Comparison")
-                fig1 = go.Figure()
-
-                fig1.add_trace(
-                    go.Bar(
-                        y=["Our Model", "Sportsbook"],
-                        x=[p_model * 100, p_book * 100],
-                        orientation="h",
-                        marker=dict(
-                            color=[
-                                "#10B981" if p_model > p_book else "#EF4444",
-                                "#6B7280",
-                            ],
-                            line=dict(width=0),
-                        ),
-                        text=[f"{p_model*100:.1f}%", f"{p_book*100:.1f}%"],
-                        textposition="inside",
-                        textfont=dict(size=16, color="white", family="Inter"),
-                        hovertemplate="%{x:.1f}%<extra></extra>",
-                    )
-                )
-
-                fig1.update_layout(
-                    template="plotly_dark",
-                    height=200,
-                    margin=dict(l=10, r=10, t=10, b=10),
-                    xaxis=dict(
-                        range=[0, 100],
-                        title="Win Probability (%)",
-                        showgrid=False,
-                    ),
-                    yaxis=dict(showgrid=False),
-                    plot_bgcolor="rgba(0,0,0,0)",
-                    paper_bgcolor="rgba(0,0,0,0)",
-                    showlegend=False,
-                )
-
-                st.plotly_chart(fig1, use_container_width=True)
-
-            with col2:
-                st.markdown("#### 💰 Expected Value")
-                ev_color = "#10B981" if ev_cents > 0 else "#EF4444"
-                ev_text = "POSITIVE" if ev_cents > 0 else "NEGATIVE"
-
-                fig2 = go.Figure()
-
-                fig2.add_trace(
-                    go.Indicator(
-                        mode="number+delta",
-                        value=ev_cents,
-                        title={
-                            "text": f"<b>{ev_text} EV</b>",
-                            "font": {"size": 18, "color": "#E5E7EB"},
-                        },
-                        number={
-                            "suffix": "¢",
-                            "font": {
-                                "size": 48,
-                                "color": ev_color,
-                                "family": "Inter",
-                            },
-                        },
-                        delta={
-                            "reference": 0,
-                            "relative": False,
-                            "position": "bottom",
-                        },
-                        domain={"x": [0, 1], "y": [0, 1]},
-                    )
-                )
-
-                fig2.update_layout(
-                    template="plotly_dark",
-                    height=200,
-                    margin=dict(l=10, r=10, t=40, b=10),
-                    plot_bgcolor="rgba(0,0,0,0)",
-                    paper_bgcolor="rgba(0,0,0,0)",
-                )
-
-                st.plotly_chart(fig2, use_container_width=True)
-
-            st.markdown("#### 📊 Your Edge vs The Market")
-            fig3 = go.Figure()
-
-            edge_color = "#10B981" if edge > 0 else "#EF4444"
-
-            fig3.add_trace(
-                go.Bar(
-                    x=["Market Edge"],
-                    y=[edge],
-                    marker=dict(color=edge_color, line=dict(width=0)),
-                    text=[f"{edge:+.1f}%"],
-                    textposition="outside",
-                    textfont=dict(size=20, color=edge_color, family="Inter"),
-                    hovertemplate="Edge: %{y:+.1f}%<extra></extra>",
-                    width=0.4,
-                )
-            )
-
-            fig3.add_hline(
-                y=0, line_dash="dash", line_color="#6B7280", line_width=2
-            )
-
-            fig3.update_layout(
-                template="plotly_dark",
-                height=250,
-                margin=dict(l=10, r=10, t=10, b=10),
-                yaxis=dict(
-                    title="Edge (%)",
-                    showgrid=True,
-                    gridcolor="rgba(107, 114, 128, 0.2)",
-                ),
-                xaxis=dict(showticklabels=False),
-                plot_bgcolor="rgba(0,0,0,0)",
-                paper_bgcolor="rgba(0,0,0,0)",
-                showlegend=False,
-            )
-
-            st.plotly_chart(fig3, use_container_width=True)
-
-        if debug_mode and debug_text:
-            with st.expander("🔧 Debug Log"):
-                st.code(debug_text)
-
-# ==========================================
-# TAB 2: LIVE SLATE (GOOGLE SHEETS)
-# ==========================================
-with tab2:
-    # Admin zone
-    with st.expander("📤 Admin Upload (Private)", expanded=False):
-        admin_code = st.text_input(
-            "Enter admin code to enable upload:", type="password", key="admin_code"
-        )
-        is_admin = admin_code == ADMIN_CODE
-
-        if is_admin:
-            st.success("✅ Admin access granted — you can now upload a new sheet.")
-            uploaded_file = st.file_uploader(
-                "Upload new latest_props.xlsx",
-                type=["xlsx"],
-                key="admin_upload",
-            )
-            if uploaded_file:
-                try:
-                    cleanup_old_results()
-                    os.makedirs(DATA_DIR, exist_ok=True)
-                    file_path = os.path.join(DATA_DIR, "latest_props.xlsx")
-                    with open(file_path, "wb") as f:
-                        f.write(uploaded_file.getbuffer())
-                    st.success("✅ Sheet updated successfully. Refreshing dashboard...")
-                    st.rerun()
-                except Exception as e:
-                    st.error(f"❌ Failed to save uploaded file: {e}")
-
-            if st.button("🚪 Log Out of Admin Mode", use_container_width=True):
-                st.session_state.pop("admin_code", None)
-                st.success("🔒 Logged out of admin mode.")
-                st.rerun()
-        elif admin_code:
-            is_admin = False
-            st.error("❌ Invalid admin code.")
+        if home.get("id") == player_team_id:
+            opp_abbr = away.get("abbreviation")
         else:
-            is_admin = False
+            opp_abbr = home.get("abbreviation")
 
-    # Live Slate header
-    render_header(is_admin=is_admin)
-    st.markdown("### 💎 Today's Live Slate")
+        return opp_abbr, team_abbr
+    except Exception:
+        return None, None
 
-    col1, col2, col3 = st.columns([2, 2, 1])
-    with col1:
-        st.markdown(
-            f"<p style='color:{TEXT_MUTED};font-size:14px;'>📡 Auto-synced from Google Sheets</p>",
-            unsafe_allow_html=True,
+# ===============================
+# 📊 DvP MULTIPLIER
+# ===============================
+
+def get_dvp_multiplier(opponent_abbr: Optional[str], position: Optional[str], stat_key: str) -> float:
+    """Calculate DvP-based matchup multiplier"""
+    try:
+        if not opponent_abbr or not isinstance(opponent_abbr, str):
+            return 1.0
+        if not position or not isinstance(position, str):
+            return 1.0
+        if not stat_key:
+            return 1.0
+
+        opp = opponent_abbr.upper()
+        pos = position.upper()
+        sk = stat_key.replace(" ", "").upper()
+
+        alias_map = {
+            "RA": "REB+AST",
+            "PR": "PTS+REB",
+            "PA": "PTS+AST",
+        }
+        sk = alias_map.get(sk, sk)
+
+        if opp not in dvp_data or pos not in dvp_data[opp]:
+            return 1.0
+
+        pos_dict = dvp_data[opp][pos]
+
+        if sk in ("REB+AST",):
+            ranks = [pos_dict.get("REB"), pos_dict.get("AST")]
+        elif sk in ("PRA",):
+            ranks = [pos_dict.get("PTS"), pos_dict.get("REB"), pos_dict.get("AST")]
+        elif sk in ("PTS+REB",):
+            ranks = [pos_dict.get("PTS"), pos_dict.get("REB")]
+        elif sk in ("PTS+AST",):
+            ranks = [pos_dict.get("PTS"), pos_dict.get("AST")]
+        else:
+            ranks = [pos_dict.get(sk)]
+
+        ranks = [r for r in ranks if r is not None]
+        if not ranks:
+            return 1.0
+
+        avg_rank = sum(ranks) / len(ranks)
+        mult = 1.1 - (avg_rank - 1) / 300.0
+
+        if mult > 1.05:
+            mult = 1 + (mult - 1) * 0.65
+        elif mult < 0.95:
+            mult = 1 - (1 - mult) * 0.85
+
+        return round(mult, 3)
+    except Exception:
+        return 1.0
+
+# ===============================
+# 📈 CORE STATISTICS HELPERS
+# ===============================
+
+def _cap(x: float, lo: float, hi: float) -> float:
+    """Clamp value between bounds"""
+    return max(lo, min(hi, x))
+
+def normalize_multiplier(raw: float, center: float = MULT_CENTER, 
+                        max_dev: float = MULT_MAX_DEV) -> float:
+    """Normalize multiplier to prevent extreme adjustments"""
+    if raw <= 0 or not math.isfinite(raw):
+        return 1.0
+    log_m = math.log(raw / center)
+    log_m *= 0.5
+    m = math.exp(log_m)
+    return _cap(m, 1.0 - max_dev, 1.0 + max_dev)
+
+def adjusted_mean(mu_base: float, multipliers: Dict[str, float],
+                 league_mu: Optional[float] = None,
+                 shrink_to_league: float = SHRINK_TO_LEAGUE) -> float:
+    """Calculate adjusted projection mean"""
+    prod = 1.0
+    for v in (multipliers or {}).values():
+        prod *= normalize_multiplier(float(v))
+    mu = mu_base * prod
+    if league_mu is not None and math.isfinite(league_mu):
+        mu = (1.0 - shrink_to_league) * mu + shrink_to_league * league_mu
+    return mu
+
+def prob_over_from_normal(mu: float, sigma: float, line: float,
+                         temp_z: float = TEMP_Z) -> float:
+    """Calculate probability of exceeding line from normal distribution"""
+    eps = 1e-9
+    sigma_eff = max(sigma, eps)
+    z = (line - mu) / sigma_eff
+    z /= max(1.0, temp_z)
+    return float(1.0 - norm.cdf(z))
+
+def smooth_empirical_prob(vals: np.ndarray, line: float, k: int = EMP_PRIOR_K) -> float:
+    """Calculate smoothed empirical probability"""
+    n = int(vals.size)
+    hits = int((vals > line).sum())
+    alpha = hits + 0.5 * k
+    beta = (n - hits) + 0.5 * k
+    return alpha / (alpha + beta)
+
+def finalize_prob(p_raw: float, balance_bias: float = BALANCE_BIAS,
+                 clip_min: float = CLIP_MIN, clip_max: float = CLIP_MAX) -> float:
+    """Finalize probability with bias correction and clipping"""
+    p = (1.0 - balance_bias) * p_raw + balance_bias * 0.5
+    return _cap(p, clip_min, clip_max)
+
+def calibrated_prob_over(mu_base: float, sigma_base: float, line: float,
+                        multipliers: Dict[str, float], recent_vals: np.ndarray,
+                        league_mu: Optional[float] = None) -> float:
+    """Calculate calibrated probability of going over"""
+    mu = adjusted_mean(mu_base, multipliers, league_mu=league_mu)
+    p_model = prob_over_from_normal(mu, sigma_base, line, temp_z=TEMP_Z)
+    p_emp = smooth_empirical_prob(np.array(recent_vals, dtype=float), line)
+    n = int(len(recent_vals))
+    w_emp = min(W_EMP_MAX, n / (n + EMP_PRIOR_K))
+    p_blend = (1 - w_emp) * p_model + w_emp * p_emp
+    return finalize_prob(p_blend)
+
+def american_to_prob(odds: int) -> float:
+    """Convert American odds to implied probability"""
+    return abs(odds) / (abs(odds) + 100) if odds < 0 else 100 / (odds + 100)
+
+def net_payout(odds: int) -> float:
+    """Calculate net payout from American odds"""
+    return 100 / abs(odds) if odds < 0 else odds / 100
+
+def ev_sportsbook(p: float, odds: int) -> float:
+    """Calculate expected value"""
+    return p * net_payout(odds) - (1 - p)
+
+# ===============================
+# 🧾 PLAYER DATA FETCHER
+# ===============================
+
+def fetch_player_data(player: str, settings: Optional[Dict] = None) -> Optional[pd.DataFrame]:
+    """Fetch player game logs"""
+    settings = settings or {}
+    data_path = settings.get("data_path", DATA_PATH_DEFAULT)
+    os.makedirs(data_path, exist_ok=True)
+    safe = player.replace(" ", "_")
+    path = os.path.join(data_path, f"{safe}.csv")
+
+    try:
+        df = fetch_player_logs(player, save_dir=data_path)
+        if df is not None and len(df) > 0:
+            df.to_csv(path, index=False)
+            return df
+    except Exception as e:
+        print_warning(f"Primary data source failed: {e}")
+
+    # Fallback to BallDontLie
+    try:
+        last_name = player.split()[-1]
+        player_data = get_bdl("/players", {"search": last_name}, settings)
+        if not player_data or not player_data.get("data"):
+            return None
+        
+        cand = None
+        for p in player_data["data"]:
+            full = f"{p.get('first_name','')} {p.get('last_name','')}".strip()
+            if full.lower() == player.lower():
+                cand = p
+                break
+        if not cand:
+            cand = player_data["data"][0]
+        
+        player_id = cand.get("id")
+        season = datetime.now().year - (1 if datetime.now().month >= 10 else 0)
+        stats = get_bdl(
+            "/stats",
+            {"player_ids[]": player_id, "seasons[]": season, "per_page": 100},
+            settings,
         )
-    with col2:
-        st.markdown(
-            f"<p style='color:{TEXT_MUTED};font-size:14px;'>🕐 Last updated: "
-            f"{datetime.now(tz=timezone.utc).strftime('%I:%M %p UTC')}</p>",
-            unsafe_allow_html=True,
-        )
-    with col3:
-        if st.button("⚡ Refresh", use_container_width=True, key="refresh_slate"):
-            load_sheet.clear()
-            st.rerun()
+        
+        if not stats or not stats.get("data"):
+            return None
+        
+        rows = []
+        for g in stats["data"]:
+            mins_raw = g.get("min", "0")
+            if isinstance(mins_raw, str) and ":" in mins_raw:
+                try:
+                    m, s = mins_raw.split(":")
+                    mins = int(m) + int(s) / 60.0
+                except Exception:
+                    mins = 0.0
+            else:
+                try:
+                    mins = float(mins_raw or 0)
+                except Exception:
+                    mins = 0.0
+            
+            rows.append({
+                "DATE": g.get("game", {}).get("date"),
+                "PTS": g.get("pts", 0),
+                "REB": g.get("reb", 0),
+                "AST": g.get("ast", 0),
+                "FG3M": g.get("fg3m", 0),
+                "MIN": mins,
+            })
+        
+        df = pd.DataFrame(rows)
+        df = df[df["MIN"] > 0]
+        df.to_csv(path, index=False)
+        return df
+    except Exception as e:
+        print_error(f"Failed to fetch player data: {e}")
+        return None
 
-    # You chose option C: edit link; we pass it through load_sheet → to_csv_url
-    SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSUhlkHIhBOhxyDZafRM0-7S933fm1-8bC6Gj6219MH4EW0thdz1YLSpBIB9OzCiKQ-Rm76TKUZ9CSp/pub?output=csv"
+# ===============================
+# 🎯 GRADING LOGIC
+# ===============================
 
-    with st.spinner("📊 Loading live sheet data..."):
+def assign_grade(ev_cents: float, confidence: float, model_prob: float, stat: str) -> str:
+    """Assign prop grade based on EV and confidence"""
+    stat_weights = {
+        "PTS": {"ev": 7.0, "conf": 0.58},
+        "REB": {"ev": 5.0, "conf": 0.54},
+        "AST": {"ev": 5.0, "conf": 0.53},
+        "PRA": {"ev": 6.0, "conf": 0.55},
+        "REB+AST": {"ev": 5.5, "conf": 0.54},
+        "FG3M": {"ev": 3.5, "conf": 0.50},
+    }
+    cfg = stat_weights.get(stat.upper(), {"ev": 5.0, "conf": 0.50})
+
+    if ev_cents >= cfg["ev"] * 1.8 and confidence >= (cfg["conf"] + 0.07) and model_prob >= 0.59:
+        return f"{Colors.ELITE}🔥 ELITE{Colors.END}"
+    if ev_cents >= cfg["ev"] and confidence >= cfg["conf"] and model_prob >= 0.54:
+        return f"{Colors.SOLID}💎 SOLID{Colors.END}"
+    if ev_cents >= 1.0 and model_prob >= 0.50 and confidence >= 0.40:
+        return f"{Colors.NEUTRAL}⚖️ NEUTRAL{Colors.END}"
+    return f"{Colors.FADE}🚫 FADE{Colors.END}"
+
+# ===============================
+# 🧠 MAIN ANALYZER
+# ===============================
+
+def analyze_single_prop(player: str, stat: str, line: float, odds: int,
+                       settings: Dict, debug_mode: bool = False) -> Optional[Dict]:
+    """Analyze a single player prop"""
+    
+    data_path = settings.get("data_path", DATA_PATH_DEFAULT)
+    os.makedirs(data_path, exist_ok=True)
+    safe = player.replace(" ", "_")
+    path = os.path.join(data_path, f"{safe}.csv")
+
+    # Load or refresh logs
+    need_refresh = not os.path.exists(path) or \
+                   (time.time() - os.path.getmtime(path)) / 3600.0 > settings.get("cache_hours", 24)
+    
+    if need_refresh:
+        print_info(f"Refreshing logs for {player}...")
+        df = fetch_player_data(player, settings)
+        if df is None or len(df) == 0:
+            print_error(f"No logs available for {player}")
+            return None
         try:
-            df_raw = load_sheet(SHEET_URL)
-        except Exception as e:
-            st.error(f"❌ Failed to load Google Sheet: {e}")
-            st.stop()
-
-    # ===== DATA CLEANUP & STATS =====
-    num_candidates = [
-        "Line",
-        "Projection",
-        "EV",
-        "Confidence",
-        "Odds",
-        "Games Analyzed",
-        "DvP Mult",
-    ]
-    df_raw = coerce_numeric(df_raw, num_candidates)
-
-    sum_stats_all = summarize_results(df_raw, result_col="Result")
-    total_props = len(df_raw)
-    if "EV" in df_raw.columns:
-        positive_ev_count = len(df_raw[df_raw["EV"].fillna(-9999) > 0])
+            df.to_csv(path, index=False)
+        except Exception:
+            pass
     else:
-        positive_ev_count = 0
+        df = pd.read_csv(path)
 
-    st.markdown("---")
-
-    st1, st2, st3, st4, st5 = st.columns(5)
-    st1.markdown(
-        f"""
-<div class='metric-card' style='text-align: center;'>
-    <div style='font-size: 24px; font-weight: 900; color: {PRIMARY};'>{total_props}</div>
-    <div style='font-size: 12px; color: {TEXT_MUTED};'>TOTAL PROPS</div>
-</div>
-""",
-        unsafe_allow_html=True,
-    )
-
-    st2.markdown(
-        f"""
-<div class='metric-card' style='text-align: center;'>
-    <div style='font-size: 24px; font-weight: 900; color: #10B981;'>{positive_ev_count}</div>
-    <div style='font-size: 12px; color: {TEXT_MUTED};'>+EV PLAYS</div>
-</div>
-""",
-        unsafe_allow_html=True,
-    )
-
-    st3.markdown(
-        f"""
-<div class='metric-card' style='text-align: center;'>
-    <div style='font-size: 24px; font-weight: 900; color: #10B981;'>{sum_stats_all['wins']}</div>
-    <div style='font-size: 12px; color: {TEXT_MUTED};'>WINS ✓</div>
-</div>
-""",
-        unsafe_allow_html=True,
-    )
-
-    st4.markdown(
-        f"""
-<div class='metric-card' style='text-align: center;'>
-    <div style='font-size: 24px; font-weight: 900; color: {ACCENT};'>{sum_stats_all['losses']}</div>
-    <div style='font-size: 12px; color: {TEXT_MUTED};'>LOSSES ✗</div>
-</div>
-""",
-        unsafe_allow_html=True,
-    )
-
-    win_rate_color = "#10B981" if sum_stats_all["win_rate"] >= 50 else ACCENT
-    st5.markdown(
-        f"""
-<div class='metric-card' style='text-align: center;'>
-    <div style='font-size: 24px; font-weight: 900; color: {win_rate_color};'>{sum_stats_all['win_rate']:.1f}%</div>
-    <div style='font-size: 12px; color: {TEXT_MUTED};'>WIN RATE</div>
-</div>
-""",
-        unsafe_allow_html=True,
-    )
-
-    st.markdown("---")
-
-    # ===== FILTERS, TABLE, SUMMARY =====
-    with st.expander("🎛️ Filter Props", expanded=False):
-        st.markdown("#### Quick Filters")
-        qf1, qf2, qf3 = st.columns(3)
-        with qf1:
-            only_top = st.checkbox("✨ Only Positive EV", value=False)
-        with qf2:
-            hide_alts = st.checkbox("🎯 Hide Alt Lines (.5)", value=False)
-        with qf3:
-            min_edge = st.number_input(
-                "💰 Min EV", value=0.0, step=0.5, help="Minimum expected value in cents"
-            )
-
-        st.markdown("#### Search & Filter")
-        f1, f2 = st.columns(2)
-        with f1:
-            search = st.text_input(
-                "🔍 Search Player Name", placeholder="Type player name..."
-            )
-        with f2:
-            min_conf = st.number_input(
-                "📊 Min Confidence",
-                value=0.0,
-                step=5.0,
-                help="Minimum confidence percentage",
-            )
-
-        f3, f4 = st.columns(2)
-        with f3:
-            stat_opt = sorted(
-                [
-                    s
-                    for s in df_raw.get("Stat", pd.Series(dtype=str))
-                    .dropna()
-                    .astype(str)
-                    .unique()
-                ]
-            )
-            stat_sel = st.multiselect(
-                "📈 Stat Type",
-                stat_opt,
-                default=[],
-                placeholder="Filter by stat...",
-            )
-        with f4:
-            opp_opt = sorted(
-                [
-                    s
-                    for s in df_raw.get("Opponent", pd.Series(dtype=str))
-                    .dropna()
-                    .astype(str)
-                    .unique()
-                ]
-            )
-            opp_sel = st.multiselect(
-                "🏀 Opponent Team",
-                opp_opt,
-                default=[],
-                placeholder="Filter by opponent...",
-            )
-
-        st.markdown("---")
-        st.caption(
-            "💡 Confidence measures how consistent the model’s data is (higher = more reliable)."
-        )
-
-    filtered = df_raw.copy()
-
-    if hide_alts:
-        filtered = drop_alt_lines(filtered)
-    if search:
-        filtered = filtered[
-            filtered["Player"].astype(str).str.contains(
-                search, case=False, na=False
-            )
-        ]
-    if stat_sel:
-        filtered = filtered[filtered["Stat"].astype(str).isin(stat_sel)]
-    if opp_sel and "Opponent" in filtered.columns:
-        filtered = filtered[filtered["Opponent"].astype(str).isin(opp_sel)]
-    if "EV" in filtered.columns:
-        filtered = filtered[filtered["EV"].fillna(-9999) >= float(min_edge)]
-    if "Confidence" in filtered.columns:
-        filtered = filtered[
-            filtered["Confidence"].fillna(-9999) >= float(min_conf)
-        ]
-    if only_top and "EV" in filtered.columns:
-        filtered = filtered[filtered["EV"].fillna(-9999) > 0]
-
-    if len(filtered) != len(df_raw):
-        st.info(
-            f"📌 Showing **{len(filtered)}** of **{len(df_raw)}** props after filters"
-        )
-
-    def style_row(row):
-        styles = [""] * len(row)
-        if "EV" in filtered.columns:
-            ev_idx = list(filtered.columns).index("EV")
+    # Clean minutes
+    if "MIN" in df.columns:
+        def parse_min(v):
+            if isinstance(v, str) and ":" in v:
+                try:
+                    m, s = v.split(":")
+                    return int(m) + int(s) / 60.0
+                except Exception:
+                    return 0.0
             try:
-                ev_val = float(row.iloc[ev_idx])
-                if ev_val > 0:
-                    styles = [
-                        "background-color: rgba(16,185,129,0.08); "
-                        "border-left: 3px solid #10B981;"
-                    ] * len(row)
-                elif ev_val < -5:
-                    styles = [
-                        f"background-color: rgba(239,68,68,0.08); "
-                        f"border-left: 3px solid {ACCENT};"
-                    ] * len(row)
+                return float(v)
             except Exception:
-                pass
-        return styles
+                return 0.0
+        df["MIN"] = df["MIN"].apply(parse_min)
+        df = df[df["MIN"] > 0]
+    
+    if df.empty:
+        print_error(f"All games filtered for {player}")
+        return None
 
-    styled = filtered.copy()
-    if len(styled) > 0:
-        styled_show = styled.style.apply(style_row, axis=1)
-        if "EV" in styled.columns:
-            styled_show = styled_show.apply(
-                lambda col: [color_ev(v) for v in col], subset=["EV"]
-            )
-        st.markdown("### 📋 Props Table")
-        st.dataframe(styled_show, use_container_width=True, height=1200)
+    # Stat handling
+    stat_norm = stat.replace(" ", "").upper()
+    stat_map_entry = STAT_MAP.get(stat_norm)
+    
+    if not stat_map_entry:
+        print_error(f"Stat '{stat}' not recognized")
+        return None
+
+    if isinstance(stat_map_entry, list):
+        df = df.copy()
+        df["COMPOSITE"] = df[stat_map_entry].sum(axis=1)
+        vals = pd.to_numeric(df["COMPOSITE"], errors="coerce").dropna()
+        stat_col_for_recent = "COMPOSITE"
     else:
-        st.warning(
-            "⚠️ No props match your current filters. Try adjusting the criteria above."
-        )
+        col = stat_map_entry
+        if col not in df.columns:
+            print_error(f"Stat column '{col}' not found for {player}")
+            return None
+        vals = pd.to_numeric(df[col], errors="coerce").dropna()
+        stat_col_for_recent = col
 
-    sum_stats = summarize_results(filtered, result_col="Result")
+    n_games = len(vals)
+    season_mean = vals.mean()
+    std = vals.std(ddof=0) if n_games > 1 else 1.0
+    mean_l10 = vals.tail(10).mean() if n_games >= 10 else season_mean
+    mean_l20 = vals.tail(20).mean() if n_games >= 20 else season_mean
+    recent_trend = (mean_l10 + mean_l20) / 2
+    trend_weight = 0.15
+    base_projection = (1 - trend_weight) * season_mean + trend_weight * recent_trend
 
-    if len(filtered) > 0:
-        st.markdown("---")
-        st.markdown("### 📊 Filtered Results Summary")
-        c1, c2, c3, c4, c5 = st.columns(5)
-        c1.metric("Wins", f"✓ {sum_stats['wins']}")
-        c2.metric("Losses", f"✗ {sum_stats['losses']}")
-        c3.metric("Close Calls", f"⚠️ {sum_stats['close']}")
-        c4.metric("Total Tracked", f"{sum_stats['total']}")
-        win_rate_delta = (
-            sum_stats["win_rate"] - 50.0 if sum_stats["total"] > 0 else 0
-        )
-        c5.metric(
-            "Win Rate",
-            f"{sum_stats['win_rate']:.1f}%",
-            delta=f"{win_rate_delta:+.1f}%",
-        )
-        st.markdown("---")
+    # Minutes adjustment
+    if "MIN" in df.columns:
+        season_mins = df["MIN"].mean()
+        l10_mins = df["MIN"].tail(10).mean() if n_games >= 10 else season_mins
+        if season_mins > 0:
+            ratio = l10_mins / season_mins
+            if abs(ratio - 1.0) > 0.10:
+                base_projection *= ratio
 
-# ==========================================
-# TAB 3: BATCH ANALYSIS (Multi-Prop)
-# ==========================================
-with tab3:
-    st.markdown("### 📊 Batch Prop Analyzer")
-    st.caption(
-        "Upload a CSV or Excel file containing player props to analyze multiple lines automatically."
+    # Probability calculations
+    p_emp = float(np.mean(vals > line)) if n_games > 0 else 0.5
+    p_norm = 1 - norm.cdf(line, season_mean, std if std > 0 else 1.0)
+    p_base = 0.6 * p_norm + 0.4 * p_emp
+
+    # Opponent + DvP
+    opp = None
+    try:
+        live_opp = get_live_opponent_from_schedule(player, settings)
+        if isinstance(live_opp, str) and live_opp not in ("N/A", "", None):
+            opp = live_opp
+    except Exception:
+        pass
+
+    if not opp:
+        try:
+            opp_res, team_abbr = get_upcoming_opponent_abbr(player, settings)
+            if opp_res:
+                opp = opp_res
+        except Exception:
+            opp = None
+
+    if isinstance(opp, tuple):
+        opp = opp[0]
+    if opp is None or not isinstance(opp, str) or not opp.strip():
+        opp = "UNKNOWN"
+    opp = opp.upper().strip()
+
+    pos = get_player_position_auto(player, df_logs=df, settings=settings)
+    
+    try:
+        dvp_mult = get_dvp_multiplier(opp, pos, stat_norm)
+    except Exception:
+        dvp_mult = 1.0
+
+    # Context multipliers
+    pace_mult = 1.0
+    p_ha = 1.0  # Home/away adjustment placeholder
+    p_usage = 1.0  # Usage adjustment placeholder
+    
+    multipliers = {"dvp": dvp_mult, "pace": pace_mult, "ha": p_ha, "usage": p_usage}
+    
+    p_model_core = calibrated_prob_over(
+        mu_base=season_mean,
+        sigma_base=std,
+        line=line,
+        multipliers=multipliers,
+        recent_vals=vals.values,
+        league_mu=None,
     )
 
-    uploaded_batch = st.file_uploader(
-        "📤 Upload File (.csv or .xlsx)",
-        type=["csv", "xlsx"],
-        key="batch_upload",
-    )
+    maturity = min(1.0, n_games / 40.0)
+    base_conf = 1 - (std / season_mean) if season_mean > 0 else 0.5
+    confidence = max(0.1, base_conf * maturity)
+    confidence = max(0.1, min(0.99, confidence))
 
-    if uploaded_batch is not None:
+    # Context adjustments
+    team_total = 112.0  # Default league average
+    rest_days = 1
+    team_mult = 1.0
+    rest_mult = 1.0
+    dvp_mult_adj = max(0.80, min(1.25, dvp_mult))
+
+    context_mult = dvp_mult_adj * team_mult * rest_mult
+    projection = base_projection * context_mult
+    
+    # Line sanity check
+    line_trust = 0.25
+    if line > 0:
+        deviation_ratio = projection / line
+        if deviation_ratio < 0.65 or deviation_ratio > 1.35:
+            projection = (1 - line_trust) * projection + line_trust * line
+
+    proj_stat = float(projection)
+
+    deviation_pct = abs(proj_stat - line) / line * 100 if line > 0 else 0.0
+    if deviation_pct > 25:
+        confidence *= 0.7
+        confidence = max(0.1, min(0.99, confidence))
+
+    p_model = max(0.05, min(p_model_core * (0.5 + 0.5 * confidence), 0.95))
+    p_book = american_to_prob(odds)
+    ev_raw = ev_sportsbook(p_model, odds)
+    ev = ev_raw * (0.5 + 0.5 * confidence)
+    ev_cents = ev * 100.0
+    edge_pct = (p_model - p_book) * 100.0
+
+    grade = assign_grade(ev_cents, confidence, p_model, stat_norm)
+
+    direction = "OVER" if proj_stat > line else "UNDER"
+    result_symbol = "⚠️" if abs(proj_stat - line) < 0.5 else ("✓" if direction == "OVER" else "✗")
+
+    return {
+        "player": player,
+        "stat": stat,
+        "line": float(line),
+        "odds": int(odds),
+        "projection": round(proj_stat, 2),
+        "p_model": float(p_model),
+        "p_book": float(p_book),
+        "ev": float(ev),
+        "n_games": int(n_games),
+        "confidence": float(confidence),
+        "grade": str(grade),
+        "opponent": opp,
+        "position": pos,
+        "dvp_mult": round(float(dvp_mult), 3),
+        "direction": direction,
+        "result": result_symbol,
+        "EV¢": round(ev_cents, 2),
+        "edge": round(edge_pct, 2),
+    }
+
+# ===============================
+# 📦 BATCH ANALYSIS
+# ===============================
+
+def batch_analyze_props(props_list: List[Dict], settings: Dict) -> List[Dict]:
+    """Analyze multiple props in batch"""
+    results = []
+    total = len(props_list)
+    
+    print_section(f"Batch Analysis: {total} Props")
+    
+    for i, prop in enumerate(props_list, start=1):
+        print(f"\n{Colors.CYAN}[{i}/{total}]{Colors.END} {prop['player']} — {prop['stat']} {prop['line']}")
         try:
-            if uploaded_batch.name.endswith(".csv"):
-                df_batch = pd.read_csv(uploaded_batch)
-            else:
-                df_batch = pd.read_excel(uploaded_batch, engine="openpyxl")
-
-            st.success(f"✅ Loaded {len(df_batch)} rows successfully.")
-            st.dataframe(df_batch.head(10), use_container_width=True)
-
-            if st.button("🚀 Analyze Batch", use_container_width=True):
-                with st.spinner("Analyzing all props... please wait ⏳"):
-                    results = []
-                    settings = pe.load_settings()
-                    for _, row in df_batch.iterrows():
-                        try:
-                            player = str(row.get("Player", "")).strip()
-                            stat = str(row.get("Stat", "")).strip()
-                            line = float(row.get("Line", 0))
-                            odds = int(row.get("Odds", -110))
-                            res = pe.analyze_single_prop(
-                                player, stat, line, odds, settings=settings
-                            )
-                            if res:
-                                results.append(res)
-                        except Exception as e:
-                            st.warning(f"⚠️ Skipped one row ({e})")
-                            continue
-
-                    if len(results) == 0:
-                        st.error("❌ No valid results.")
-                        st.stop()
-
-                    df_results = pd.DataFrame(results)
-                    st.success(
-                        f"✅ Completed batch analysis of {len(df_results)} props!"
-                    )
-                    st.dataframe(
-                        df_results, use_container_width=True, height=500
-                    )
-
-                    csv_buf = io.BytesIO()
-                    df_results.to_csv(csv_buf, index=False)
-                    st.download_button(
-                        "💾 Download Results as CSV",
-                        data=csv_buf.getvalue(),
-                        file_name="propulse_batch_results.csv",
-                        mime="text/csv",
-                    )
-
+            res = analyze_single_prop(
+                prop["player"], prop["stat"], prop["line"], 
+                prop["odds"], settings, debug_mode=False
+            )
+            if res:
+                results.append(res)
+                # Show quick result
+                ev_color = Colors.GREEN if res['ev'] > 0 else Colors.RED
+                print(f"  {Colors.GRAY}→{Colors.END} Projection: {Colors.BOLD}{res['projection']:.1f}{Colors.END} | "
+                      f"EV: {ev_color}{res['EV¢']:+.1f}¢{Colors.END} | Grade: {res['grade']}")
         except Exception as e:
-            st.error(f"❌ Failed to read uploaded file: {e}")
-    else:
-        st.info("📎 Upload a batch file above to start.")
+            print_error(f"Failed: {e}")
+    
+    return results
 
-# ==========================================
-# TAB 4: CSV IMPORT / VIEWER
-# ==========================================
-with tab4:
-    st.markdown("### 📁 Import or Preview Any Local CSV File")
+# ===============================
+# 🎨 DISPLAY HELPERS
+# ===============================
 
-    file = st.file_uploader(
-        "Select a CSV or Excel file", type=["csv", "xlsx"]
-    )
-    if file:
+def display_result(result: Dict):
+    """Display analysis result with professional formatting"""
+    
+    print_header(f"🏀 {result['player']} | {result['stat']} Analysis")
+    
+    # Key Metrics
+    print_section("📊 Key Metrics")
+    print_metric("Model Projection", f"{result['projection']:.2f} {result['stat']}", Colors.CYAN)
+    print_metric("Line", f"{result['line']}", Colors.GRAY)
+    print_metric("Games Analyzed", f"{result['n_games']}", Colors.GRAY)
+    
+    # Probabilities & EV
+    print_section("🎯 Probability Analysis")
+    print_metric("Model Win Prob", f"{result['p_model']*100:.1f}%", Colors.CYAN)
+    print_metric("Book Implied Prob", f"{result['p_book']*100:.1f}%", Colors.GRAY)
+    print_metric("Edge", f"{result['edge']:+.2f}%", 
+                Colors.GREEN if result['edge'] > 0 else Colors.RED)
+    
+    # Expected Value
+    ev_color = Colors.GREEN if result['ev'] > 0 else Colors.RED
+    ev_symbol = "+" if result['ev'] > 0 else ""
+    print(f"\n  {Colors.BOLD}Expected Value:{Colors.END} {ev_color}{ev_symbol}{result['EV¢']:.2f}¢{Colors.END} per $1")
+    print(f"  {Colors.BOLD}Confidence:{Colors.END} {Colors.CYAN}{result['confidence']:.2%}{Colors.END}")
+    print(f"  {Colors.BOLD}Grade:{Colors.END} {result['grade']}")
+    
+    # Recommendation
+    recommendation = f"{Colors.GREEN}BET {result['direction']}{Colors.END}" if result['ev'] > 0 else f"{Colors.RED}FADE THIS PROP{Colors.END}"
+    print(f"\n  {Colors.BOLD}→ Recommendation:{Colors.END} {recommendation}")
+    
+    # Context
+    print_section("🔍 Matchup Context")
+    print_metric("Opponent", result['opponent'], Colors.YELLOW)
+    print_metric("Position", result['position'], Colors.GRAY)
+    print_metric("DvP Multiplier", f"{result['dvp_mult']:.3f}x", 
+                Colors.GREEN if result['dvp_mult'] > 1 else Colors.RED if result['dvp_mult'] < 1 else Colors.GRAY)
+    
+    print(f"\n{Colors.GRAY}{'═' * 70}{Colors.END}\n")
+
+def display_batch_summary(results: List[Dict]):
+    """Display batch analysis summary"""
+    
+    print_header("📊 Batch Analysis Summary")
+    
+    total = len(results)
+    positive_ev = sum(1 for r in results if r['ev'] > 0)
+    elite = sum(1 for r in results if "ELITE" in r['grade'])
+    solid = sum(1 for r in results if "SOLID" in r['grade'])
+    
+    print_metric("Total Props Analyzed", total, Colors.CYAN)
+    print_metric("Positive EV Plays", f"{positive_ev} ({positive_ev/total*100:.1f}%)", Colors.GREEN)
+    print_metric("Elite Grades", elite, Colors.ELITE)
+    print_metric("Solid Grades", solid, Colors.SOLID)
+    
+    # Top 5 by EV
+    sorted_results = sorted(results, key=lambda x: x['ev'], reverse=True)
+    
+    print_section("🔥 Top 5 Props by EV")
+    for i, r in enumerate(sorted_results[:5], 1):
+        ev_color = Colors.GREEN if r['ev'] > 0 else Colors.RED
+        print(f"  {i}. {Colors.BOLD}{r['player']:20}{Colors.END} {r['stat']:8} {r['line']:5.1f} | "
+              f"Proj: {Colors.CYAN}{r['projection']:5.1f}{Colors.END} | "
+              f"EV: {ev_color}{r['EV¢']:>6.1f}¢{Colors.END} | {r['grade']}")
+    
+    print(f"\n{Colors.GRAY}{'═' * 70}{Colors.END}\n")
+
+# ===============================
+# 💾 EXPORT FUNCTIONS
+# ===============================
+
+def export_results(results: List[Dict], filename: str = None):
+    """Export results to CSV"""
+    if not filename:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"propulse_results_{timestamp}.csv"
+    
+    df = pd.DataFrame(results)
+    df.to_csv(filename, index=False)
+    print_success(f"Results exported to {filename}")
+
+# ===============================
+# 🖥️ MAIN CLI
+# ===============================
+
+def main():
+    """Main CLI interface"""
+    settings = load_settings()
+    
+    clear_screen()
+    
+    # ASCII Art Banner
+    print(f"""{Colors.BLUE}
+╔═══════════════════════════════════════════════════════════════════╗
+║                                                                   ║
+║   {Colors.CYAN}██████╗ ██████╗  ██████╗ ██████╗ ██████╗ ██╗   ██╗██╗     ███████╗{Colors.BLUE}║
+║   {Colors.CYAN}██╔══██╗██╔══██╗██╔═══██╗██╔══██╗██╔══██╗██║   ██║██║     ██╔════╝{Colors.BLUE}║
+║   {Colors.CYAN}██████╔╝██████╔╝██║   ██║██████╔╝██████╔╝██║   ██║██║     ███████╗{Colors.BLUE}║
+║   {Colors.CYAN}██╔═══╝ ██╔══██╗██║   ██║██╔═══╝ ██╔═══╝ ██║   ██║██║     ╚════██║{Colors.BLUE}║
+║   {Colors.CYAN}██║     ██║  ██║╚██████╔╝██║     ██║     ╚██████╔╝███████╗███████║{Colors.BLUE}║
+║   {Colors.CYAN}╚═╝     ╚═╝  ╚═╝ ╚═════╝ ╚═╝     ╚═╝      ╚═════╝ ╚══════╝╚══════╝{Colors.BLUE}║
+║                                                                   ║
+║            {Colors.BOLD}Professional NBA Player Prop Analyzer v2025.6{Colors.END}{Colors.BLUE}         ║
+║               {Colors.GRAY}Advanced DvP · L20 Weighted · Auto Position{Colors.BLUE}             ║
+╚═══════════════════════════════════════════════════════════════════╝
+{Colors.END}""")
+    
+    while True:
+        print(f"\n{Colors.BOLD}{Colors.CYAN}═══ MAIN MENU ═══{Colors.END}\n")
+        print(f"  {Colors.CYAN}[1]{Colors.END} Single Prop Analysis")
+        print(f"  {Colors.CYAN}[2]{Colors.END} Batch Analysis")
+        print(f"  {Colors.CYAN}[3]{Colors.END} Compare Props")
+        print(f"  {Colors.GRAY}[Q]{Colors.END} Quit\n")
+        
         try:
-            if file.name.endswith(".csv"):
-                df = pd.read_csv(file)
-            else:
-                df = pd.read_excel(file, engine="openpyxl")
-            st.success(f"✅ Loaded {len(df)} rows from {file.name}")
-            st.dataframe(
-                df.head(50), use_container_width=True, height=400
-            )
-        except Exception as e:
-            st.error(f"❌ Failed to load file: {e}")
-    else:
-        st.info("Upload a file to preview its contents.")
+            mode = input(f"{Colors.BOLD}Select mode:{Colors.END} ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            print(f"\n{Colors.GRAY}Exiting...{Colors.END}")
+            return
 
-# ==========================================
-# TAB 5: PROP COMPARISON TOOL
-# ==========================================
-with tab5:
-    st.markdown("### ⚖️ Prop Comparison — Compare Two Player Lines")
+        # Quit
+        if mode in ("q", "quit", "exit"):
+            print(f"\n{Colors.GREEN}Thanks for using PropPulse+! 🏀{Colors.END}\n")
+            return
 
-    c1, c2 = st.columns(2)
-    with c1:
-        p1 = st.text_input("Player 1", "LeBron James")
-        s1 = st.selectbox(
-            "Stat 1", ["PTS", "REB", "AST", "PRA", "FG3M"], key="s1"
-        )
-        l1 = st.number_input(
-            "Line 1", 0.0, 100.0, 25.5, 0.5, key="l1"
-        )
-    with c2:
-        p2 = st.text_input("Player 2", "Jayson Tatum")
-        s2 = st.selectbox(
-            "Stat 2", ["PTS", "REB", "AST", "PRA", "FG3M"], key="s2"
-        )
-        l2 = st.number_input(
-            "Line 2", 0.0, 100.0, 25.5, 0.5, key="l2"
-        )
+        # Single Analysis
+        if mode in ("1", ""):
+            try:
+                print(f"\n{Colors.BOLD}═══ Single Prop Analysis ═══{Colors.END}\n")
+                
+                player = input(f"{Colors.CYAN}Player name:{Colors.END} ").strip()
+                if not player:
+                    print_error("Player name required")
+                    continue
+                
+                print(f"\n{Colors.GRAY}Stats: PTS, REB, AST, REB+AST, PRA, P+R, P+A, FG3M{Colors.END}")
+                stat = input(f"{Colors.CYAN}Stat:{Colors.END} ").strip().upper()
+                
+                line = float(input(f"{Colors.CYAN}Line:{Colors.END} ").strip())
+                odds = int(input(f"{Colors.CYAN}Odds (e.g., -110):{Colors.END} ").strip())
+                
+                debug_input = input(f"{Colors.CYAN}Debug mode? (y/N):{Colors.END} ").strip().lower()
+                debug_mode = debug_input in ("y", "yes")
 
-    if st.button("🔍 Compare", use_container_width=True):
-        try:
-            settings = pe.load_settings()
-            r1 = pe.analyze_single_prop(p1, s1, l1, -110, settings=settings)
-            r2 = pe.analyze_single_prop(p2, s2, l2, -110, settings=settings)
+                print(f"\n{Colors.YELLOW}⏳ Analyzing {player}'s {stat} projection...{Colors.END}\n")
+                
+                result = analyze_single_prop(player, stat, line, odds, settings, debug_mode)
+                
+                if not result:
+                    print_error("Analysis returned no result")
+                    continue
 
-            comp_df = pd.DataFrame(
-                [
-                    {
-                        "Player": p1,
-                        "Stat": s1,
-                        "Projection": r1["projection"],
-                        "EV¢": round(r1["ev"] * 100, 1),
-                    },
-                    {
-                        "Player": p2,
-                        "Stat": s2,
-                        "Projection": r2["projection"],
-                        "EV¢": round(r2["ev"] * 100, 1),
-                    },
-                ]
-            )
-            st.dataframe(comp_df, use_container_width=True)
+                display_result(result)
+                
+                # Ask to save
+                save = input(f"{Colors.CYAN}Save result to CSV? (y/N):{Colors.END} ").strip().lower()
+                if save in ("y", "yes"):
+                    export_results([result])
+                
+            except ValueError as e:
+                print_error(f"Invalid input: {e}")
+            except Exception as e:
+                print_error(f"Analysis failed: {e}")
+            
+            input(f"\n{Colors.GRAY}Press Enter to continue...{Colors.END}")
+            clear_screen()
+            continue
 
-            fig = go.Figure()
-            fig.add_trace(
-                go.Bar(
-                    x=comp_df["Player"],
-                    y=comp_df["EV¢"],
-                    marker=dict(color=["#10B981", "#EF4444"]),
-                    text=comp_df["EV¢"],
-                    textposition="outside",
-                )
-            )
-            fig.update_layout(
-                template="plotly_dark",
-                yaxis_title="Expected Value (¢)",
-                height=300,
-                showlegend=False,
-            )
-            st.plotly_chart(fig, use_container_width=True)
-        except Exception as e:
-            st.error(f"❌ Comparison failed: {e}")
+        # Batch Analysis
+        if mode == "2":
+            print(f"\n{Colors.BOLD}═══ Batch Analysis ═══{Colors.END}\n")
+            print(f"{Colors.GRAY}Enter props one per line in format: Player STAT LINE ODDS{Colors.END}")
+            print(f"{Colors.GRAY}Example: LeBron James PRA 35.5 -110{Colors.END}")
+            print(f"{Colors.GRAY}Type 'done' when finished{Colors.END}\n")
 
-# ==========================================
-# FOOTER
-# ==========================================
-st.markdown(
-    """
-    <div class="footer">
-      © 2025 <strong>PropPulse+</strong> — Developed by <strong>QacePicks</strong>.<br>
-      Data-calibrated | Matchup-weighted | Automated NBA Prop Analytics
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
-# ======================================================
-# 🚀 Vercel Streamlit Launcher (Required)
-# ======================================================
+            props = []
+            while True:
+                line_in = input(f"{Colors.CYAN}Prop:{Colors.END} ").strip()
+                if line_in.lower() in ("done", "d", ""):
+                    break
+
+                try:
+                    parts = line_in.split()
+                    player = " ".join(parts[:-3])
+                    stat = parts[-3].upper()
+                    line = float(parts[-2])
+                    odds = int(parts[-1])
+
+                    props.append({
+                        "player": player,
+                        "stat": stat,
+                        "line": line,
+                        "odds": odds,
+                    })
+                    print_success(f"Added: {player} {stat} {line}")
+                except Exception:
+                    print_error("Invalid format. Use: PlayerName STAT LINE ODDS")
+                    continue
+
+            if not props:
+                print_warning("No props entered")
+                continue
+
+            print(f"\n{Colors.YELLOW}⏳ Analyzing {len(props)} props...{Colors.END}\n")
+            results = batch_analyze_props(props, settings)
+
+            if not results:
+                print_error("No results returned")
+                continue
+
+            display_batch_summary(results)
+            
+            # Ask to save
+            save = input(f"{Colors.CYAN}Save results to CSV? (Y/n):{Colors.END} ").strip().lower()
+            if save not in ("n", "no"):
+                export_results(results)
+            
+            input(f"\n{Colors.GRAY}Press Enter to continue...{Colors.END}")
+            clear_screen()
+            continue
+
+        # Compare Props
+        if mode == "3":
+            print(f"\n{Colors.BOLD}═══ Prop Comparison ═══{Colors.END}\n")
+            
+            try:
+                print(f"{Colors.CYAN}Prop 1:{Colors.END}")
+                p1 = input("  Player: ").strip()
+                s1 = input("  Stat: ").strip().upper()
+                l1 = float(input("  Line: ").strip())
+                o1 = int(input("  Odds: ").strip())
+                
+                print(f"\n{Colors.CYAN}Prop 2:{Colors.END}")
+                p2 = input("  Player: ").strip()
+                s2 = input("  Stat: ").strip().upper()
+                l2 = float(input("  Line: ").strip())
+                o2 = int(input("  Odds: ").strip())
+                
+                print(f"\n{Colors.YELLOW}⏳ Comparing props...{Colors.END}\n")
+                
+                r1 = analyze_single_prop(p1, s1, l1, o1, settings)
+                r2 = analyze_single_prop(p2, s2, l2, o2, settings)
+                
+                if not r1 or not r2:
+                    print_error("Failed to analyze one or both props")
+                    continue
+                
+                print_header("⚖️ Prop Comparison")
+                
+                # Side by side comparison
+                print(f"\n{Colors.BOLD}{'Metric':<20} {'Prop 1':<25} {'Prop 2':<25}{Colors.END}")
+                print(Colors.GRAY + "─" * 70 + Colors.END)
+                
+                print(f"{'Player':<20} {p1:<25} {p2:<25}")
+                print(f"{'Stat':<20} {s1:<25} {s2:<25}")
+                print(f"{'Line':<20} {l1:<25} {l2:<25}")
+                print(f"{'Projection':<20} {Colors.CYAN}{r1['projection']:<25.2f}{Colors.END} {Colors.CYAN}{r2['projection']:<25.2f}{Colors.END}")
+                
+                ev1_color = Colors.GREEN if r1['ev'] > 0 else Colors.RED
+                ev2_color = Colors.GREEN if r2['ev'] > 0 else Colors.RED
+                print(f"{'EV (¢)':<20} {ev1_color}{r1['EV¢']:<25.2f}{Colors.END} {ev2_color}{r2['EV¢']:<25.2f}{Colors.END}")
+                
+                print(f"{'Confidence':<20} {r1['confidence']:<25.2%} {r2['confidence']:<25.2%}")
+                print(f"{'Grade':<20} {r1['grade']:<40} {r2['grade']}")
+                
+                # Recommendation
+                better = 1 if r1['ev'] > r2['ev'] else 2
+                print(f"\n{Colors.BOLD}→ Better Value:{Colors.END} {Colors.GREEN}Prop {better}{Colors.END}")
+                
+                print(f"\n{Colors.GRAY}{'═' * 70}{Colors.END}\n")
+                
+            except Exception as e:
+                print_error(f"Comparison failed: {e}")
+            
+            input(f"\n{Colors.GRAY}Press Enter to continue...{Colors.END}")
+            clear_screen()
+            continue
+
+        print_warning("Invalid option. Please select 1, 2, 3, or Q")
+
+# ===============================
+# 🚀 ENTRY POINT
+# ===============================
+
 if __name__ == "__main__":
-    import sys
-    import streamlit.web.cli as stcli
-
-    # Vercel runs the script as a normal Python file — this converts it into a Streamlit runtime
-    sys.argv = [
-        "streamlit", 
-        "run", 
-        "app.py", 
-        "--server.port", 
-        "8000", 
-        "--server.address", 
-        "0.0.0.0"
-    ]
-    sys.exit(stcli.main())
+    try:
+        main()
+    except KeyboardInterrupt:
+        print(f"\n\n{Colors.GRAY}Interrupted by user. Exiting...{Colors.END}\n")
+        sys.exit(0)
+    except Exception as e:
+        print_error(f"Fatal error: {e}")
+        sys.exit(1)
