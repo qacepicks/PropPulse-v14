@@ -13,6 +13,20 @@ import streamlit as st
 import pandas as pd
 import numpy as np
 import plotly.graph_objects as go
+# ===============================
+# 🔗 Google Sheets config (Live EV Board)
+# ===============================
+SHEET_ID = "1SHuoEg331k_dcrgBoc7y8gWbgw1QTKHFJRzzNRqiOnE"
+SHEET_GID = "1954146299"  # the worksheet/tab you're using
+SHEET_CSV_URL = (
+    f"https://docs.google.com/spreadsheets/d/{SHEET_ID}/export"
+    f"?format=csv&gid={SHEET_GID}"
+)
+
+# =============================
+# 🔒 ADMIN CONFIG (Private Use)
+# =============================
+ADMIN_CODE = "qace"
 
 # ============
 # Model import
@@ -33,11 +47,21 @@ st.set_page_config(
     initial_sidebar_state="expanded"
 )
 
-# ==========================================
-# 🔗 GOOGLE SHEET CONFIG (for Live Slate)
-# ==========================================
-SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSWlPdkXdvE7DrRCa5Wpb98VnBvN0ug46nMKj_wBzC541ssEk7vEN9JYYHVmjSl7NQmEQWhGX94OtA4/pubhtml"
-GID = None  # Optional: specific sheet tab ID
+# 🔗 LOCAL DATA CONFIG (for Live Slate)
+DATA_DIR = "data"
+LATEST_FILE = os.path.join(DATA_DIR, "latest_props.xlsx")
+
+def cleanup_old_results():
+    """Keep only latest_props.xlsx and all player logs (CSV); delete older .xlsx results."""
+    if not os.path.exists(DATA_DIR):
+        return
+    for f in os.listdir(DATA_DIR):
+        if f.endswith(".xlsx") and f != "latest_props.xlsx":
+            try:
+                os.remove(os.path.join(DATA_DIR, f))
+            except Exception:
+                pass
+
 
 # =========
 # Logo util
@@ -230,26 +254,40 @@ f"""
 # ======
 # Header
 # ======
-st.markdown(
-    f"""
-<div class="main-header">
-  <div class="brand-container">
-    {logo_html}
-    <div class="brand-text">
-      <div class="brand-title">PropPulse+</div>
-      <div class="brand-subtitle">Advanced NBA Player Prop Analytics Platform</div>
-    </div>
-    <div class="status-badge">LIVE</div>
-  </div>
-</div>
-""",
-    unsafe_allow_html=True,
-)
+def render_header(is_admin=False):
+    """Render header with optional Admin badge."""
+    admin_badge_html = ""
+    if is_admin:
+        admin_badge_html = """
+        <div class="status-badge" style="background: rgba(16,185,129,.15);
+             border: 2px solid #10B981; color:#10B981; margin-left:10px;">
+             🧠 ADMIN MODE
+        </div>
+        """
+    st.markdown(
+        f"""
+        <div class="main-header">
+          <div class="brand-container">
+            {logo_html}
+            <div class="brand-text">
+              <div class="brand-title">PropPulse+</div>
+              <div class="brand-subtitle">Advanced NBA Player Prop Analytics Platform</div>
+            </div>
+            <div style="display:flex;align-items:center;gap:10px;">
+              <div class="status-badge">LIVE</div>
+              {admin_badge_html}
+            </div>
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
 
 # ==========================================
 # HELPER FUNCTIONS FOR LIVE SHEET
 # ==========================================
-
+A
 def to_csv_url(url: str, gid: int | None = None) -> str:
     """Convert Google Sheets publish URL to CSV endpoint."""
     if "output=csv" in url:
@@ -558,416 +596,380 @@ with tab1:
 # TAB 2: LIVE SLATE
 # ==========================================
 with tab2:
-    st.markdown("### 💎 Today's Live Slate")
-    
-    col1, col2, col3 = st.columns([2, 2, 1])
-    with col1:
-        st.markdown(f"<p style='color: {TEXT_MUTED}; font-size: 14px;'>📡 Auto-synced from Google Sheets</p>", unsafe_allow_html=True)
-    with col2:
-        st.markdown(f"<p style='color: {TEXT_MUTED}; font-size: 14px;'>🕐 Last updated: {datetime.now(tz=timezone.utc).strftime('%I:%M %p UTC')}</p>", unsafe_allow_html=True)
-    with col3:
-        if st.button("⚡ Refresh", use_container_width=True, key="refresh_slate"):
-            load_sheet.clear()
-            st.rerun()
-    
-    with st.spinner("📊 Loading latest props..."):
+    # =============================
+    # 🔒 ADMIN UPLOAD CONTROL
+    # =============================
+    with st.expander("📤 Admin Upload (Private)", expanded=False):
+        admin_code = st.text_input("Enter admin code to enable upload:", type="password", key="admin_code")
+        is_admin = admin_code == ADMIN_CODE
+
+        if is_admin:
+            st.success("✅ Admin access granted — you can now upload a new sheet.")
+            uploaded_file = st.file_uploader("Upload new latest_props.xlsx", type=["xlsx"], key="admin_upload")
+            if uploaded_file:
+                try:
+                    cleanup_old_results()
+                    file_path = os.path.join(DATA_DIR, "latest_props.xlsx")
+                    with open(file_path, "wb") as f:
+                        f.write(uploaded_file.getbuffer())
+                    st.success("✅ Sheet updated successfully. Refreshing dashboard...")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"❌ Failed to save uploaded file: {e}")
+            
+            # 🧩 Log-out button for admin
+            if st.button("🚪 Log Out of Admin Mode", use_container_width=True):
+                st.session_state.pop("admin_code", None)
+                st.success("🔒 Logged out of admin mode.")
+                st.rerun()
+
+        elif admin_code:
+            st.error("❌ Invalid admin code.")
+
+    # =====================================================
+# 💎 LIVE SLATE DASHBOARD (GOOGLE SHEETS VERSION)
+# =====================================================
+
+# 🧠 Render header with Admin badge
+render_header(is_admin=is_admin)
+
+st.markdown("### 💎 Today's Live Slate")
+
+col1, col2, col3 = st.columns([2, 2, 1])
+with col1:
+    st.markdown(
+        f"<p style='color:{TEXT_MUTED};font-size:14px;'>📡 Auto-synced from Google Sheets</p>",
+        unsafe_allow_html=True,
+    )
+with col2:
+    st.markdown(
+        f"<p style='color:{TEXT_MUTED};font-size:14px;'>🕐 Last updated: "
+        f"{datetime.now(tz=timezone.utc).strftime('%I:%M %p UTC')}</p>",
+        unsafe_allow_html=True,
+    )
+with col3:
+    if st.button("⚡ Refresh", use_container_width=True, key="refresh_slate"):
+        load_sheet.clear()
+        st.rerun()
+
+# 🧾 Enter your published Google Sheet URL here:
+SHEET_URL = "https://docs.google.com/spreadsheets/d/1SHuoEg331k_dcrgBoc7y8gWbgw1QTKHFJRzzNRqiOnE/edit?gid=1954146299#gid=1954146299"  # replace with your live sheet URL
+
+with st.spinner("📊 Loading live sheet data..."):
+    try:
+        df_raw = load_sheet(SHEET_URL)
+    except Exception as e:
+        st.error(f"❌ Failed to load Google Sheet: {e}")
+        st.stop()
+
+# =====================================================
+# 💎 LIVE SLATE DASHBOARD (GOOGLE SHEETS VERSION)
+# =====================================================
+
+# 🧠 Render header with Admin badge
+render_header(is_admin=is_admin)
+
+st.markdown("### 💎 Today's Live Slate")
+
+col1, col2, col3 = st.columns([2, 2, 1])
+with col1:
+    st.markdown(
+        f"<p style='color:{TEXT_MUTED};font-size:14px;'>📡 Auto-synced from Google Sheets</p>",
+        unsafe_allow_html=True,
+    )
+with col2:
+    st.markdown(
+        f"<p style='color:{TEXT_MUTED};font-size:14px;'>🕐 Last updated: "
+        f"{datetime.now(tz=timezone.utc).strftime('%I:%M %p UTC')}</p>",
+        unsafe_allow_html=True,
+    )
+with col3:
+    if st.button("⚡ Refresh", use_container_width=True, key="refresh_slate"):
+        load_sheet.clear()
+        st.rerun()
+
+# 🧾 ENTER YOUR GOOGLE SHEET LINK HERE:
+SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vXXXXX/pub?output=csv"  # replace with your own
+
+with st.spinner("📊 Loading live sheet data..."):
+    try:
+        df_raw = load_sheet(SHEET_URL)
+    except Exception as e:
+        st.error(f"❌ Failed to load Google Sheet: {e}")
+        st.stop()
+
+# =====================================================
+# ✅ DATA CLEANUP & STATS
+# =====================================================
+num_candidates = ["Line", "Projection", "EV", "Confidence", "Odds", "Games Analyzed", "DvP Mult"]
+df_raw = coerce_numeric(df_raw, num_candidates)
+
+sum_stats_all = summarize_results(df_raw, result_col="Result")
+total_props = len(df_raw)
+positive_ev_count = len(df_raw[df_raw["EV"].fillna(-9999) > 0]) if "EV" in df_raw.columns else 0
+
+st.markdown("---")
+
+st1, st2, st3, st4, st5 = st.columns(5)
+st1.markdown(f"""
+<div class='metric-card' style='text-align: center;'>
+    <div style='font-size: 24px; font-weight: 900; color: {PRIMARY};'>{total_props}</div>
+    <div style='font-size: 12px; color: {TEXT_MUTED};'>TOTAL PROPS</div>
+</div>
+""", unsafe_allow_html=True)
+
+st2.markdown(f"""
+<div class='metric-card' style='text-align: center;'>
+    <div style='font-size: 24px; font-weight: 900; color: #10B981;'>{positive_ev_count}</div>
+    <div style='font-size: 12px; color: {TEXT_MUTED};'>+EV PLAYS</div>
+</div>
+""", unsafe_allow_html=True)
+
+st3.markdown(f"""
+<div class='metric-card' style='text-align: center;'>
+    <div style='font-size: 24px; font-weight: 900; color: #10B981;'>{sum_stats_all['wins']}</div>
+    <div style='font-size: 12px; color: {TEXT_MUTED};'>WINS ✓</div>
+</div>
+""", unsafe_allow_html=True)
+
+st4.markdown(f"""
+<div class='metric-card' style='text-align: center;'>
+    <div style='font-size: 24px; font-weight: 900; color: {ACCENT};'>{sum_stats_all['losses']}</div>
+    <div style='font-size: 12px; color: {TEXT_MUTED};'>LOSSES ✗</div>
+</div>
+""", unsafe_allow_html=True)
+
+win_rate_color = '#10B981' if sum_stats_all['win_rate'] >= 50 else ACCENT
+st5.markdown(f"""
+<div class='metric-card' style='text-align: center;'>
+    <div style='font-size: 24px; font-weight: 900; color: {win_rate_color};'>{sum_stats_all['win_rate']:.1f}%</div>
+    <div style='font-size: 12px; color: {TEXT_MUTED};'>WIN RATE</div>
+</div>
+""", unsafe_allow_html=True)
+
+st.markdown("---")
+
+# =====================================================
+# 🎛️ FILTERS, TABLE, AND SUMMARY
+# =====================================================
+with st.expander("🎛️ Filter Props", expanded=False):
+    st.markdown("#### Quick Filters")
+    qf1, qf2, qf3 = st.columns(3)
+    with qf1:
+        only_top = st.checkbox("✨ Only Positive EV", value=False)
+    with qf2:
+        hide_alts = st.checkbox("🎯 Hide Alt Lines (.5)", value=False)
+    with qf3:
+        min_edge = st.number_input("💰 Min EV", value=0.0, step=0.5, help="Minimum expected value in cents")
+
+    st.markdown("#### Search & Filter")
+    f1, f2 = st.columns(2)
+    with f1:
+        search = st.text_input("🔍 Search Player Name", placeholder="Type player name...")
+    with f2:
+        min_conf = st.number_input("📊 Min Confidence", value=0.0, step=5.0, help="Minimum confidence percentage")
+
+    f3, f4 = st.columns(2)
+    with f3:
+        stat_opt = sorted([s for s in df_raw.get("Stat", pd.Series(dtype=str)).dropna().astype(str).unique()])
+        stat_sel = st.multiselect("📈 Stat Type", stat_opt, default=[], placeholder="Filter by stat...")
+    with f4:
+        opp_opt = sorted([s for s in df_raw.get("Opponent", pd.Series(dtype=str)).dropna().astype(str).unique()])
+        opp_sel = st.multiselect("🏀 Opponent Team", opp_opt, default=[], placeholder="Filter by opponent...")
+
+    st.markdown("---")
+    st.caption("💡 Confidence measures how consistent the model’s data is (higher = more reliable).")
+
+filtered = df_raw.copy()
+
+if hide_alts:
+    filtered = drop_alt_lines(filtered)
+if search:
+    filtered = filtered[filtered["Player"].astype(str).str.contains(search, case=False, na=False)]
+if stat_sel:
+    filtered = filtered[filtered["Stat"].astype(str).isin(stat_sel)]
+if opp_sel and "Opponent" in filtered.columns:
+    filtered = filtered[filtered["Opponent"].astype(str).isin(opp_sel)]
+if "EV" in filtered.columns:
+    filtered = filtered[filtered["EV"].fillna(-9999) >= float(min_edge)]
+if "Confidence" in filtered.columns:
+    filtered = filtered[filtered["Confidence"].fillna(-9999) >= float(min_conf)]
+if only_top and "EV" in filtered.columns:
+    filtered = filtered[filtered["EV"].fillna(-9999) > 0]
+
+if len(filtered) != len(df_raw):
+    st.info(f"📌 Showing **{len(filtered)}** of **{len(df_raw)}** props after filters")
+
+def style_row(row):
+    styles = [''] * len(row)
+    if 'EV' in filtered.columns:
+        ev_idx = list(filtered.columns).index('EV')
         try:
-            df_raw = load_sheet(SHEET_URL, GID)
-        except Exception as e:
-            st.error(f"❌ Failed to load sheet: {e}")
-            st.stop()
+            ev_val = float(row.iloc[ev_idx])
+            if ev_val > 0:
+                styles = [f'background-color: rgba(16,185,129,0.08); border-left: 3px solid #10B981;'] * len(row)
+            elif ev_val < -5:
+                styles = [f'background-color: rgba(239,68,68,0.08); border-left: 3px solid {ACCENT};'] * len(row)
+        except:
+            pass
+    return styles
 
-    num_candidates = ["Line", "Projection", "EV", "Confidence", "Odds", "Games Analyzed", "DvP Mult"]
-    df_raw = coerce_numeric(df_raw, num_candidates)
+styled = filtered.copy()
+if len(styled) > 0:
+    styled_show = styled.style.apply(style_row, axis=1)
+    if "EV" in styled.columns:
+        styled_show = styled_show.apply(lambda col: [color_ev(v) for v in col], subset=["EV"])
+    st.markdown("### 📋 Props Table")
+    st.dataframe(styled_show, use_container_width=True, height=500)
+else:
+    st.warning("⚠️ No props match your current filters. Try adjusting the criteria above.")
 
-    sum_stats_all = summarize_results(df_raw, result_col="Result")
-    total_props = len(df_raw)
-    positive_ev_count = len(df_raw[df_raw["EV"].fillna(-9999) > 0]) if "EV" in df_raw.columns else 0
-    
+sum_stats = summarize_results(filtered, result_col="Result")
+
+if len(filtered) > 0:
     st.markdown("---")
-    
-    st1, st2, st3, st4, st5 = st.columns(5)
-    st1.markdown(f"""
-    <div class='metric-card' style='text-align: center;'>
-        <div style='font-size: 24px; font-weight: 900; color: {PRIMARY};'>{total_props}</div>
-        <div style='font-size: 12px; color: {TEXT_MUTED};'>TOTAL PROPS</div>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    st2.markdown(f"""
-    <div class='metric-card' style='text-align: center;'>
-        <div style='font-size: 24px; font-weight: 900; color: #10B981;'>{positive_ev_count}</div>
-        <div style='font-size: 12px; color: {TEXT_MUTED};'>+EV PLAYS</div>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    st3.markdown(f"""
-    <div class='metric-card' style='text-align: center;'>
-        <div style='font-size: 24px; font-weight: 900; color: #10B981;'>{sum_stats_all['wins']}</div>
-        <div style='font-size: 12px; color: {TEXT_MUTED};'>WINS ✓</div>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    st4.markdown(f"""
-    <div class='metric-card' style='text-align: center;'>
-        <div style='font-size: 24px; font-weight: 900; color: {ACCENT};'>{sum_stats_all['losses']}</div>
-        <div style='font-size: 12px; color: {TEXT_MUTED};'>LOSSES ✗</div>
-    </div>
-    """, unsafe_allow_html=True)
-    
-    win_rate_color = '#10B981' if sum_stats_all['win_rate'] >= 50 else ACCENT
-    st5.markdown(f"""
-    <div class='metric-card' style='text-align: center;'>
-        <div style='font-size: 24px; font-weight: 900; color: {win_rate_color};'>{sum_stats_all['win_rate']:.1f}%</div>
-        <div style='font-size: 12px; color: {TEXT_MUTED};'>WIN RATE</div>
-    </div>
-    """, unsafe_allow_html=True)
-
+    st.markdown("### 📊 Filtered Results Summary")
+    c1, c2, c3, c4, c5 = st.columns(5)
+    c1.metric("Wins", f"✓ {sum_stats['wins']}")
+    c2.metric("Losses", f"✗ {sum_stats['losses']}")
+    c3.metric("Close Calls", f"⚠️ {sum_stats['close']}")
+    c4.metric("Total Tracked", f"{sum_stats['total']}")
+    win_rate_delta = sum_stats['win_rate'] - 50.0 if sum_stats['total'] > 0 else 0
+    c5.metric("Win Rate", f"{sum_stats['win_rate']:.1f}%", delta=f"{win_rate_delta:+.1f}%")
     st.markdown("---")
-
-    with st.expander("🎛️ Filter Props", expanded=False):
-        st.markdown("#### Quick Filters")
-        qf1, qf2, qf3 = st.columns(3)
-        with qf1:
-            only_top = st.checkbox("✨ Only Positive EV", value=False)
-        with qf2:
-            hide_alts = st.checkbox("🎯 Hide Alt Lines (.5)", value=False)
-        with qf3:
-            min_edge = st.number_input("💰 Min EV", value=0.0, step=0.5, help="Minimum expected value in cents")
-        
-        st.markdown("#### Search & Filter")
-        f1, f2 = st.columns(2)
-        with f1:
-            search = st.text_input("🔍 Search Player Name", placeholder="Type player name...")
-        with f2:
-            min_conf = st.number_input("📊 Min Confidence", value=0.0, step=5.0, help="Minimum confidence percentage")
-        
-        f3, f4 = st.columns(2)
-        with f3:
-            stat_opt = sorted([s for s in df_raw.get("Stat", pd.Series(dtype=str)).dropna().astype(str).unique()])
-            stat_sel = st.multiselect("📈 Stat Type", stat_opt, default=[], placeholder="Filter by stat...")
-        with f4:
-            opp_opt = sorted([s for s in df_raw.get("Opponent", pd.Series(dtype=str)).dropna().astype(str).unique()])
-            opp_sel = st.multiselect("🏀 Opponent Team", opp_opt, default=[], placeholder="Filter by opponent...")
-        
-        st.markdown("---")
-        st.markdown("##### 💡 What does Min Confidence mean?")
-        st.caption("**Confidence** shows how certain the model is about a prediction. Higher confidence = more reliable data (more games analyzed, consistent patterns, strong matchups). Set a minimum to filter out uncertain picks and focus on the model's strongest plays.")
-
-    filtered = df_raw.copy()
-
-    if hide_alts:
-        filtered = drop_alt_lines(filtered)
-
-    if search:
-        mask = filtered.get("Player", pd.Series(dtype=str)).astype(str).str.contains(search, case=False, na=False)
-        filtered = filtered[mask]
-
-    if stat_sel:
-        filtered = filtered[filtered["Stat"].astype(str).isin(stat_sel)]
-
-    if opp_sel and "Opponent" in filtered.columns:
-        filtered = filtered[filtered["Opponent"].astype(str).isin(opp_sel)]
-
-    if "EV" in filtered.columns:
-        filtered = filtered[filtered["EV"].fillna(-9999) >= float(min_edge)]
-
-    if "Confidence" in filtered.columns:
-        filtered = filtered[filtered["Confidence"].fillna(-9999) >= float(min_conf)]
-
-    if only_top and "EV" in filtered.columns:
-        filtered = filtered[filtered["EV"].fillna(-9999) > 0]
-
-    if len(filtered) != len(df_raw):
-        st.info(f"📌 Showing **{len(filtered)}** of **{len(df_raw)}** props after filters")
-
-    def style_row(row):
-        styles = [''] * len(row)
-        if 'EV' in filtered.columns:
-            ev_idx = list(filtered.columns).index('EV')
-            try:
-                ev_val = float(row.iloc[ev_idx])
-                if ev_val > 0:
-                    styles = [f'background-color: rgba(16, 185, 129, 0.08); border-left: 3px solid #10B981;'] * len(row)
-                elif ev_val < -5:
-                    styles = [f'background-color: rgba(239, 68, 68, 0.08); border-left: 3px solid {ACCENT};'] * len(row)
-            except:
-                pass
-        return styles
-
-    styled = filtered.copy()
-    if len(styled) > 0:
-        styled_show = styled.style.apply(style_row, axis=1)
-        
-        if "EV" in styled.columns:
-            styled_show = styled_show.apply(lambda col: [color_ev(v) for v in col], subset=["EV"])
-        
-        st.markdown("### 📋 Props Table")
-        st.dataframe(styled_show, use_container_width=True, height=500)
-    else:
-        st.warning("⚠️ No props match your current filters. Try adjusting the criteria above.")
-
-    sum_stats = summarize_results(filtered, result_col="Result")
-    
-    if len(filtered) > 0:
-        st.markdown("---")
-        st.markdown("### 📊 Filtered Results Summary")
-        c1, c2, c3, c4, c5 = st.columns(5)
-        
-        c1.metric("Wins", f"✓ {sum_stats['wins']}", delta=None)
-        c2.metric("Losses", f"✗ {sum_stats['losses']}", delta=None)
-        c3.metric("Close Calls", f"⚠️ {sum_stats['close']}", delta=None)
-        c4.metric("Total Tracked", f"{sum_stats['total']}", delta=None)
-        
-        win_rate_delta = sum_stats['win_rate'] - 50.0 if sum_stats['total'] > 0 else 0
-        c5.metric("Win Rate", f"{sum_stats['win_rate']:.1f}%", delta=f"{win_rate_delta:+.1f}%")
 
 # ==========================================
-# TAB 3: BATCH MANUAL ENTRY
+# TAB 3: BATCH ANALYSIS (Multi-Prop)
 # ==========================================
 with tab3:
-    st.markdown("### 📊 Batch Manual Entry")
-    n_props = st.number_input("Number of props", 1, 20, 3)
-    manual_entries = []
-    for i in range(int(n_props)):
-        c1, c2, c3, c4 = st.columns(4)
-        p = c1.text_input("Player", key=f"player_{i}")
-        s = c2.selectbox("Stat", ["PTS", "REB", "AST", "PRA", "FG3M"], key=f"stat_{i}")
-        ln = c3.number_input("Line", 0.0, 100.0, 20.0, key=f"line_{i}")
-        od = c4.text_input("Odds", "-110", key=f"odds_{i}")
-        if p.strip():
-            manual_entries.append({"player": p, "stat": s, "line": ln, "odds": od})
+    render_header()
 
-    if st.button("🚀 ANALYZE BATCH", use_container_width=True):
-        if not manual_entries:
-            st.error("⚠️ Please enter at least one valid player.")
-            st.stop()
-        settings = pe.load_settings()
-        settings["analysis_date"] = datetime.now().strftime("%Y-%m-%d")
-        results = []
-        for entry in manual_entries:
-            try:
-                res = pe.analyze_single_prop(entry["player"], entry["stat"], float(entry["line"]), int(entry["odds"]), settings)
-                if res:
-                    results.append(res)
-            except Exception as e:
-                st.warning(f"⚠️ Skipped {entry['player']}: {e}")
-        if results:
-            df = pd.DataFrame(results)
-            st.dataframe(df, use_container_width=True)
-            csv = df.to_csv(index=False).encode("utf-8")
-            st.download_button("💾 Download Results CSV", csv, "batch_results.csv", use_container_width=True)
+    st.markdown("### 📊 Batch Prop Analyzer")
+    st.caption("Upload a CSV or Excel file containing player props to analyze multiple lines automatically.")
+
+    uploaded_batch = st.file_uploader("📤 Upload File (.csv or .xlsx)", type=["csv", "xlsx"], key="batch_upload")
+
+    if uploaded_batch is not None:
+        try:
+            if uploaded_batch.name.endswith(".csv"):
+                df_batch = pd.read_csv(uploaded_batch)
+            else:
+                df_batch = pd.read_excel(uploaded_batch, engine="openpyxl")
+
+            st.success(f"✅ Loaded {len(df_batch)} rows successfully.")
+            st.dataframe(df_batch.head(10), use_container_width=True)
+
+            if st.button("🚀 Analyze Batch", use_container_width=True):
+                with st.spinner("Analyzing all props... please wait ⏳"):
+                    results = []
+                    settings = pe.load_settings()
+                    for _, row in df_batch.iterrows():
+                        try:
+                            player = str(row.get("Player", "")).strip()
+                            stat = str(row.get("Stat", "")).strip()
+                            line = float(row.get("Line", 0))
+                            odds = int(row.get("Odds", -110))
+                            res = pe.analyze_single_prop(player, stat, line, odds, settings=settings)
+                            if res:
+                                results.append(res)
+                        except Exception as e:
+                            st.warning(f"⚠️ Skipped one row ({e})")
+                            continue
+
+                    if len(results) == 0:
+                        st.error("❌ No valid results.")
+                        st.stop()
+
+                    df_results = pd.DataFrame(results)
+                    st.success(f"✅ Completed batch analysis of {len(df_results)} props!")
+                    st.dataframe(df_results, use_container_width=True, height=500)
+
+                    csv_buf = io.BytesIO()
+                    df_results.to_csv(csv_buf, index=False)
+                    st.download_button(
+                        "💾 Download Results as CSV",
+                        data=csv_buf.getvalue(),
+                        file_name="propulse_batch_results.csv",
+                        mime="text/csv",
+                    )
+
+        except Exception as e:
+            st.error(f"❌ Failed to read uploaded file: {e}")
+    else:
+        st.info("📎 Upload a batch file above to start.")
 
 # ==========================================
-# TAB 4: CSV IMPORT
+# TAB 4: CSV IMPORT / VIEWER
 # ==========================================
 with tab4:
-    st.markdown("### 📁 CSV Import")
-    uploaded = st.file_uploader("Upload CSV", type=["csv"])
-    if uploaded:
-        df = pd.read_csv(uploaded)
-        st.dataframe(df, use_container_width=True)
-        if st.button("🚀 ANALYZE CSV DATA", use_container_width=True):
-            settings = pe.load_settings()
-            settings["analysis_date"] = datetime.now().strftime("%Y-%m-%d")
-            results = []
-            for _, row in df.iterrows():
-                try:
-                    res = pe.analyze_single_prop(row["player"], row["stat"], float(row["line"]), int(row["odds"]), settings)
-                    if res:
-                        results.append(res)
-                except Exception as e:
-                    st.warning(f"⚠️ {row.get('player','(unknown)')}: {e}")
-            if results:
-                df2 = pd.DataFrame(results)
-                st.dataframe(df2, use_container_width=True)
-                csv = df2.to_csv(index=False).encode("utf-8")
-                st.download_button("💾 Download Results CSV", csv, "results.csv", use_container_width=True)
+    render_header()
+    st.markdown("### 📁 Import or Preview Any Local CSV File")
+
+    file = st.file_uploader("Select a CSV or Excel file", type=["csv", "xlsx"])
+    if file:
+        try:
+            if file.name.endswith(".csv"):
+                df = pd.read_csv(file)
+            else:
+                df = pd.read_excel(file, engine="openpyxl")
+            st.success(f"✅ Loaded {len(df)} rows from {file.name}")
+            st.dataframe(df.head(50), use_container_width=True, height=400)
+        except Exception as e:
+            st.error(f"❌ Failed to load file: {e}")
+    else:
+        st.info("Upload a file to preview its contents.")
 
 # ==========================================
 # TAB 5: PROP COMPARISON TOOL
 # ==========================================
 with tab5:
-    st.markdown("### ⚖️ Compare Props Side-by-Side")
-    st.markdown("Compare up to 3 player props to find the best value bet")
-    
-    num_compare = st.radio("Number of props to compare:", [2, 3], horizontal=True)
-    
-    comparison_data = []
-    
-    cols = st.columns(num_compare)
-    
-    for i, col in enumerate(cols):
-        with col:
-            st.markdown(f"#### Player {i+1}")
-            player = st.text_input(f"Player Name", key=f"cmp_player_{i}", placeholder="LeBron James")
-            stat = st.selectbox(f"Stat", ["PTS", "REB", "AST", "REB+AST", "PRA", "P+R", "P+A", "FG3M"], key=f"cmp_stat_{i}")
-            line = st.number_input(f"Line", 0.0, 100.0, 25.5, 0.5, key=f"cmp_line_{i}")
-            odds = st.number_input(f"Odds", value=-110, step=5, key=f"cmp_odds_{i}")
-            
-            if player.strip():
-                comparison_data.append({
-                    "player": player,
-                    "stat": stat,
-                    "line": line,
-                    "odds": odds
-                })
-    
-    if st.button("⚖️ COMPARE PROPS", use_container_width=True):
-        if len(comparison_data) < 2:
-            st.error("⚠️ Please enter at least 2 players to compare")
-            st.stop()
-        
+    render_header()
+    st.markdown("### ⚖️ Prop Comparison — Compare Two Player Lines")
+
+    c1, c2 = st.columns(2)
+    with c1:
+        p1 = st.text_input("Player 1", "LeBron James")
+        s1 = st.selectbox("Stat 1", ["PTS", "REB", "AST", "PRA", "FG3M"], key="s1")
+        l1 = st.number_input("Line 1", 0.0, 100.0, 25.5, 0.5, key="l1")
+    with c2:
+        p2 = st.text_input("Player 2", "Jayson Tatum")
+        s2 = st.selectbox("Stat 2", ["PTS", "REB", "AST", "PRA", "FG3M"], key="s2")
+        l2 = st.number_input("Line 2", 0.0, 100.0, 25.5, 0.5, key="l2")
+
+    if st.button("🔍 Compare", use_container_width=True):
         try:
             settings = pe.load_settings()
-            settings["analysis_date"] = datetime.now().strftime("%Y-%m-%d")
-        except Exception as e:
-            st.error(f"❌ Failed to load settings: {e}")
-            st.stop()
-        
-        results = []
-        with st.spinner("🏀 Analyzing props..."):
-            for entry in comparison_data:
-                try:
-                    result = pe.analyze_single_prop(
-                        entry["player"], entry["stat"], 
-                        float(entry["line"]), int(entry["odds"]),
-                        settings=settings, debug_mode=False
-                    )
-                    if result:
-                        result['input_line'] = entry['line']
-                        results.append(result)
-                except Exception as e:
-                    st.warning(f"⚠️ Failed to analyze {entry['player']}: {e}")
-        
-        if not results:
-            st.error("❌ Unable to analyze any props")
-            st.stop()
-        
-        st.success("✅ Comparison Complete!")
-        st.markdown("---")
-        
-        cols = st.columns(len(results))
-        for idx, (col, result) in enumerate(zip(cols, results)):
-            with col:
-                player_name = result.get('player', 'Unknown')
-                stat_type = result.get('stat', 'N/A')
-                projection = result.get('projection', 0)
-                ev = result.get('ev', 0) * 100
-                edge = (result.get('p_model', 0) - result.get('p_book', 0)) * 100
-                confidence = result.get('confidence', 0)
-                
-                ev_color = '#10B981' if ev > 0 else '#EF4444'
-                
-                st.markdown(f"""
-                <div class='metric-card' style='border: 2px solid {PRIMARY}; padding: 20px;'>
-                    <h3 style='margin: 0 0 10px 0; color: {TEXT_PRIMARY};'>{player_name}</h3>
-                    <p style='color: {TEXT_MUTED}; font-size: 14px; margin: 0 0 15px 0;'>{stat_type} • Line: {result['input_line']}</p>
-                    
-                    <div style='margin: 10px 0;'>
-                        <div style='font-size: 32px; font-weight: 900; color: {PRIMARY};'>{projection:.1f}</div>
-                        <div style='font-size: 12px; color: {TEXT_MUTED};'>PROJECTION</div>
-                    </div>
-                    
-                    <div style='margin: 15px 0; padding: 10px; background: rgba(37,99,235,0.1); border-radius: 8px;'>
-                        <div style='font-size: 24px; font-weight: 800; color: {ev_color};'>{ev:+.1f}¢</div>
-                        <div style='font-size: 11px; color: {TEXT_MUTED};'>EXPECTED VALUE</div>
-                    </div>
-                    
-                    <div style='display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-top: 15px;'>
-                        <div>
-                            <div style='font-size: 18px; font-weight: 700; color: {TEXT_PRIMARY};'>{edge:+.1f}%</div>
-                            <div style='font-size: 10px; color: {TEXT_MUTED};'>EDGE</div>
-                        </div>
-                        <div>
-                            <div style='font-size: 18px; font-weight: 700; color: {TEXT_PRIMARY};'>{confidence:.0f}%</div>
-                            <div style='font-size: 10px; color: {TEXT_MUTED};'>CONFIDENCE</div>
-                        </div>
-                    </div>
-                </div>
-                """, unsafe_allow_html=True)
-        
-        st.markdown("---")
-        
-        best_ev = max(results, key=lambda x: x.get('ev', -999))
-        best_confidence = max(results, key=lambda x: x.get('confidence', 0))
-        best_edge = max(results, key=lambda x: (x.get('p_model', 0) - x.get('p_book', 0)))
-        
-        st.markdown("### 🏆 Verdict")
-        
-        col1, col2, col3 = st.columns(3)
-        
-        with col1:
-            st.markdown(f"""
-            <div style='padding: 15px; background: rgba(16,185,129,0.1); border-radius: 12px; border: 2px solid #10B981;'>
-                <div style='font-size: 14px; color: {TEXT_MUTED}; margin-bottom: 5px;'>🎯 BEST VALUE</div>
-                <div style='font-size: 20px; font-weight: 800; color: #10B981;'>{best_ev.get('player', 'N/A')}</div>
-                <div style='font-size: 12px; color: {TEXT_MUTED}; margin-top: 5px;'>Highest EV: {best_ev.get('ev', 0)*100:+.1f}¢</div>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        with col2:
-            st.markdown(f"""
-            <div style='padding: 15px; background: rgba(37,99,235,0.1); border-radius: 12px; border: 2px solid {PRIMARY};'>
-                <div style='font-size: 14px; color: {TEXT_MUTED}; margin-bottom: 5px;'>📊 MOST CONFIDENT</div>
-                <div style='font-size: 20px; font-weight: 800; color: {PRIMARY};'>{best_confidence.get('player', 'N/A')}</div>
-                <div style='font-size: 12px; color: {TEXT_MUTED}; margin-top: 5px;'>Confidence: {best_confidence.get('confidence', 0):.0f}%</div>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        with col3:
-            st.markdown(f"""
-            <div style='padding: 15px; background: rgba(239,68,68,0.1); border-radius: 12px; border: 2px solid {ACCENT};'>
-                <div style='font-size: 14px; color: {TEXT_MUTED}; margin-bottom: 5px;'>🔥 BIGGEST EDGE</div>
-                <div style='font-size: 20px; font-weight: 800; color: {ACCENT};'>{best_edge.get('player', 'N/A')}</div>
-                <div style='font-size: 12px; color: {TEXT_MUTED}; margin-top: 5px;'>Edge: {(best_edge.get('p_model', 0) - best_edge.get('p_book', 0))*100:+.1f}%</div>
-            </div>
-            """, unsafe_allow_html=True)
-        
-        st.markdown("---")
-        st.markdown("### 📊 Visual Comparison")
-        
-        fig_ev = go.Figure()
-        
-        players = [r.get('player', 'Unknown') for r in results]
-        evs = [r.get('ev', 0) * 100 for r in results]
-        colors = ['#10B981' if ev > 0 else '#EF4444' for ev in evs]
-        
-        fig_ev.add_trace(go.Bar(
-            x=players,
-            y=evs,
-            marker=dict(color=colors, line=dict(width=0)),
-            text=[f'{ev:+.1f}¢' for ev in evs],
-            textposition='outside',
-            textfont=dict(size=16, family='Inter'),
-            hovertemplate='%{x}<br>EV: %{y:+.1f}¢<extra></extra>'
-        ))
-        
-        fig_ev.add_hline(y=0, line_dash="dash", line_color="#6B7280", line_width=2)
-        
-        fig_ev.update_layout(
-            title="Expected Value Comparison",
-            template="plotly_dark",
-            height=400,
-            yaxis=dict(title='Expected Value (¢)', showgrid=True, gridcolor='rgba(107, 114, 128, 0.2)'),
-            xaxis=dict(title=''),
-            plot_bgcolor='rgba(0,0,0,0)',
-            paper_bgcolor='rgba(0,0,0,0)',
-            showlegend=False
-        )
-        
-        st.plotly_chart(fig_ev, use_container_width=True)
+            r1 = pe.analyze_single_prop(p1, s1, l1, -110, settings=settings)
+            r2 = pe.analyze_single_prop(p2, s2, l2, -110, settings=settings)
 
-# ======
-# Footer
-# ======
+            comp_df = pd.DataFrame([
+                {"Player": p1, "Stat": s1, "Projection": r1["projection"], "EV¢": round(r1["ev"]*100,1)},
+                {"Player": p2, "Stat": s2, "Projection": r2["projection"], "EV¢": round(r2["ev"]*100,1)}
+            ])
+            st.dataframe(comp_df, use_container_width=True)
+
+            fig = go.Figure()
+            fig.add_trace(go.Bar(
+                x=comp_df["Player"], y=comp_df["EV¢"],
+                marker=dict(color=['#10B981','#EF4444']),
+                text=comp_df["EV¢"], textposition='outside'
+            ))
+            fig.update_layout(template="plotly_dark",
+                              yaxis_title="Expected Value (¢)",
+                              height=300, showlegend=False)
+            st.plotly_chart(fig, use_container_width=True)
+        except Exception as e:
+            st.error(f"❌ Comparison failed: {e}")
+
+# ==========================================
+# FOOTER
+# ==========================================
 st.markdown(
-    """
-<div class="footer">
-  <strong>PropPulse+ v2025.6</strong> — Engineered &amp; Curated by <strong style="color:#2563EB;">QacePicks</strong><br>
-  Data-Calibrated • Matchup-Weighted • Built for Professional Bettors<br><br>
-  <em>⚠️ For entertainment and educational purposes only. Bet responsibly.</em>
-</div>
-""",
-    unsafe_allow_html=True,
+    f"""
+    <div class="footer">
+      © 2025 <strong>PropPulse+</strong> — Developed by <strong>QacePicks</strong>.<br>
+      Data-calibrated | Matchup-weighted | Automated NBA Prop Analytics
+    </div>
+    """,
+    unsafe_allow_html=True
 )
