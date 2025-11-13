@@ -734,10 +734,7 @@ with tab2:
             st.rerun()
 
     # You chose option C: edit link; we pass it through load_sheet → to_csv_url
-    SHEET_URL = (
-        "https://docs.google.com/spreadsheets/d/"
-        "1SHuoEg331k_dcrgBoc7y8gWbgw1QTKHFJRzzNRqiOnE/edit?gid=1954146299"
-    )
+    SHEET_URL = "https://docs.google.com/spreadsheets/d/e/2PACX-1vSUhlkHIhBOhxyDZafRM0-7S933fm1-8bC6Gj6219MH4EW0thdz1YLSpBIB9OzCiKQ-Rm76TKUZ9CSp/pub?output=csv"
 
     with st.spinner("📊 Loading live sheet data..."):
         try:
