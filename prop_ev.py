@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
-# prop_ev.py — PropPulse+ v2025.4 Clean Edition
-# L20-weighted projection + DvP + auto position + NBA/BDL opponent + manual odds
+# prop_ev.py — PropPulse+ v2025.6 Hybrid Edition
+# Hybrid logs (NBA Stats → BDL) + DvP + auto position + NBA/BDL opponent + manual odds
 
 import os, sys, time, math, json, glob, platform, subprocess
 from datetime import datetime, timedelta, timezone
@@ -43,7 +43,7 @@ STAT_MAP = {
     "P+A": ["PTS", "AST"],
 }
 
-# Load tuned config if present
+# Load tuned config if present (for advanced grading)
 def load_tuned_config(path="proppulse_config_latest.json"):
     if not os.path.exists(path):
         print(f"[Config] ℹ️ Tuned config not found: {path}")
@@ -135,17 +135,14 @@ def get_bdl(endpoint, params=None, settings=None, timeout=10):
         return None
 
 # ===============================
-# 📊 DVP DATA (NBA Stats–based)
+# 📊 DvP DATA (NBA Stats–based)
 # ===============================
-from dvp_updater import load_dvp_data
 
 try:
     dvp_data = load_dvp_data()  # pulls from cache or NBA Stats
 except Exception as e:
     print(f"[DVP] ⚠️ Failed to load DvP: {e}")
     dvp_data = {}
-
-
 
 # ===============================
 # 🔍 POSITION DETECTION
@@ -369,10 +366,13 @@ def get_upcoming_opponent_abbr(player_name: str, settings=None):
         return None, None
 
 # ===============================
-# 📊 DvP MULTIPLIER
+# 📊 DvP MULTIPLIER (Medium weight)
 # ===============================
 
 def get_dvp_multiplier(opponent_abbr: str | None, position: str | None, stat_key: str) -> float:
+    """
+    Returns a medium-impact DvP multiplier, clamped to ~±8%.
+    """
     try:
         if not opponent_abbr or not isinstance(opponent_abbr, str):
             return 1.0
@@ -414,12 +414,17 @@ def get_dvp_multiplier(opponent_abbr: str | None, position: str | None, stat_key
             return 1.0
 
         avg_rank = sum(ranks) / len(ranks)
-        mult = 1.1 - (avg_rank - 1) / 300.0
+        # Base mapping: average rank around middle → ~1.0, extreme ranks → a bit off 1
+        mult = 1.06 - (avg_rank - 1) / 350.0  # slightly tighter than old 1.1/300
 
+        # Damp extremes further for "medium" effect
         if mult > 1.05:
-            mult = 1 + (mult - 1) * 0.65
+            mult = 1 + (mult - 1) * 0.6
         elif mult < 0.95:
-            mult = 1 - (1 - mult) * 0.85
+            mult = 1 - (1 - mult) * 0.75
+
+        # Final clamp: ±8% around 1.0
+        mult = max(0.92, min(1.08, mult))
 
         return round(mult, 3)
     except Exception as e:
@@ -501,12 +506,14 @@ def ev_sportsbook(p: float, odds: int) -> float:
     return p * net_payout(odds) - (1 - p)
 
 # ===============================
-# 🧾 PLAYER LOG FETCHER
+# 🧾 PLAYER LOG FETCHER (Hybrid: NBA Stats → BDL)
 # ===============================
 
 def fetch_player_data(player: str, settings=None):
     """
-    Unified fetcher: try nba_stats_fetcher logs first, then BallDontLie.
+    Hybrid fetcher:
+      1) Try nba_stats_fetcher (NBA Stats wrapper, saved to data_path)
+      2) Fallback to BallDontLie season stats
     """
     settings = settings or {}
     data_path = settings.get("data_path", DATA_PATH_DEFAULT)
@@ -514,7 +521,7 @@ def fetch_player_data(player: str, settings=None):
     safe = player.replace(" ", "_")
     path = os.path.join(data_path, f"{safe}.csv")
 
-    # Prefer local / nba_stats_fetcher
+    # Prefer local / nba_stats_fetcher (NBA Stats)
     try:
         df = fetch_player_logs(player, save_dir=data_path)
         if df is not None and len(df) > 0:
@@ -661,7 +668,7 @@ def get_usage_factor(player: str, stat: str, settings) -> float:
 
 def get_rest_days(player: str, settings) -> int:
     try:
-        # Simple stub: 1 rest day
+        # Simple stub: 1 rest day (extend later if you wire in schedule history)
         return 1
     except Exception:
         return 1
@@ -726,13 +733,56 @@ def debug_projection(df: pd.DataFrame, stat: str, line: float, player_name: str)
 # ===============================
 
 def analyze_single_prop(player, stat, line, odds, settings, debug_mode=False):
+    # ===============================
+    # 🔧 INPUT NORMALIZATION (Fix streamlit types)
+    # ===============================
+
+    # Normalize stat
+    try:
+        if not isinstance(stat, str):
+            stat = str(stat)
+        stat = stat.strip().upper()
+    except Exception:
+        print(f"[TypeFix] ⚠️ Failed to normalize stat '{stat}', defaulting to PTS")
+        stat = "PTS"
+
+    # Normalize line → float
+    try:
+        if isinstance(line, str):
+            line = float(line.strip())
+        else:
+            line = float(line)
+    except Exception:
+        print(f"[TypeFix] ⚠️ Failed to convert line '{line}' to float, defaulting to 0.0")
+        line = 0.0
+
+    # Normalize odds → int
+    try:
+        if isinstance(odds, str):
+            odds = int(odds.replace("+", "").strip())
+        else:
+            odds = int(odds)
+    except Exception:
+        print(f"[TypeFix] ⚠️ Failed to convert odds '{odds}' to int, defaulting to -110")
+        odds = -110
+
+    # ===============================
+    # 📁 PATH / SAVE DIR
+    # ===============================
+
     data_path = settings.get("data_path", DATA_PATH_DEFAULT)
     os.makedirs(data_path, exist_ok=True)
     safe = player.replace(" ", "_")
     path = os.path.join(data_path, f"{safe}.csv")
 
-    # Load / refresh logs
-    need_refresh = not os.path.exists(path) or (time.time() - os.path.getmtime(path)) / 3600.0 > settings.get("cache_hours", 24)
+    # ===============================
+    # 📥 LOAD / REFRESH LOGS
+    # ===============================
+
+    need_refresh = (
+        not os.path.exists(path)
+        or (time.time() - os.path.getmtime(path)) / 3600.0 > settings.get("cache_hours", 24)
+    )
     if need_refresh:
         print(f"[Data] ⏳ Refreshing logs for {player}...")
         df = fetch_player_data(player, settings)
@@ -810,7 +860,7 @@ def analyze_single_prop(player, stat, line, odds, settings, debug_mode=False):
     p_base = 0.6 * p_norm + 0.4 * p_emp
 
     p_ha = get_homeaway_adjustment(player, stat, line, settings)
-    p_l10 = get_recent_form(df, stat_col_for_recent, line)
+    p_l10 = get_recent_form(df, stat_col_for_recent, line)  # currently used implicitly via vals
     p_usage = get_usage_factor(player, stat, settings)
 
     # Opponent + DvP
@@ -867,7 +917,7 @@ def analyze_single_prop(player, stat, line, odds, settings, debug_mode=False):
 
     team_mult = min(1.20, max(0.85, team_total / 112.0 if team_total else 1.0))
     rest_mult = {0: 0.96, 1: 1.00, 2: 1.03}.get(rest_days, 1.05)
-    dvp_mult_adj = max(0.80, min(1.25, dvp_mult))
+    dvp_mult_adj = max(0.92, min(1.08, dvp_mult))  # match the DvP clamping
 
     context_mult = dvp_mult_adj * team_mult * rest_mult
     print(f"[Context] DvP={dvp_mult_adj:.3f} × Team={team_mult:.3f} × Rest={rest_mult:.3f} = {context_mult:.3f}")
@@ -897,21 +947,23 @@ def analyze_single_prop(player, stat, line, odds, settings, debug_mode=False):
     edge_pct = (p_model - p_book) * 100.0
     ev_score = ev_cents * confidence
 
+    # ===============================
+    # 🎯 UNIFIED GRADING (CCB choice)
+    # ===============================
     try:
-        grade_simple = assign_grade(ev_cents, confidence, p_model, stat_norm)
-    except Exception as e:
-        print(f"[Grading-simple] ⚠️ {e}")
-        grade_simple = "NEUTRAL"
-
-    try:
-        ev_pct = (p_model - p_book) * 100.0
         gap_abs = abs(proj_stat - line)
-        grade_model = grade_prop(ev_pct, confidence, gap_abs, dvp_mult)
+        if CONFIG_TUNED:
+            # Use tuned JSON config when available
+            grade = grade_prop(edge_pct, confidence, gap_abs, dvp_mult)
+        else:
+            # Fallback to stat-based thresholds
+            grade = assign_grade(ev_cents, confidence, p_model, stat_norm)
     except Exception as e:
-        print(f"[Grading-model] ⚠️ {e}")
-        grade_model = "NEUTRAL"
+        print(f"[Grading] ⚠️ {e}")
+        grade = "NEUTRAL"
 
-    grade = grade_model
+    # grade_simple kept for compatibility but matches main grade
+    grade_simple = grade
 
     injury = get_injury_status(player, settings.get("injury_api_key"))
 
@@ -948,6 +1000,10 @@ def analyze_single_prop(player, stat, line, odds, settings, debug_mode=False):
 # ===============================
 
 def grade_prop(ev_pct, conf, gap_abs, dvp):
+    """
+    Tuned grading using external JSON config.
+    Used when CONFIG_TUNED is available.
+    """
     cfg = CONFIG_TUNED
     if not cfg:
         return "NEUTRAL"
@@ -987,6 +1043,9 @@ def grade_prop(ev_pct, conf, gap_abs, dvp):
     return "NEUTRAL"
 
 def assign_grade(ev_cents: float, confidence: float, model_prob: float, stat: str) -> str:
+    """
+    Fallback stat-based grading when tuned JSON config isn't available.
+    """
     stat_weights = {
         "PTS": {"ev": 7.0, "conf": 0.58},
         "REB": {"ev": 5.0, "conf": 0.54},
@@ -1013,10 +1072,14 @@ def get_betting_grade(ev: float, model_prob: float, confidence: float) -> str:
     return "PASS"
 
 # ===============================
-# 📦 BATCH + CLI
+# 📦 BATCH + CLI + STREAMLIT HOOKS
 # ===============================
 
 def batch_analyze_props(props_list, settings):
+    """
+    Simple list-of-dicts batch (used by CLI).
+    props_list: [{"player":..., "stat":..., "line":..., "odds":...}, ...]
+    """
     results = []
     for i, prop in enumerate(props_list, start=1):
         print(f"\n[{i}/{len(props_list)}] 📊 {prop['player']} — {prop['stat']} {prop['line']}")
@@ -1030,10 +1093,68 @@ def batch_analyze_props(props_list, settings):
             print(f"[Batch] ⚠️ Error on {prop['player']}: {e}")
     return results
 
+def analyze_batch_df(df_input: pd.DataFrame, settings=None, debug_mode=False) -> pd.DataFrame:
+    """
+    Streamlit-friendly batch interface:
+    Expects columns: Player, Stat, Line, Odds (case-insensitive).
+    """
+    if settings is None:
+        settings = load_settings()
+
+    col_map = {c.lower(): c for c in df_input.columns}
+
+    def get_col(name_options):
+        for name in name_options:
+            if name.lower() in col_map:
+                return col_map[name.lower()]
+        return None
+
+    col_player = get_col(["Player", "player"])
+    col_stat   = get_col(["Stat", "stat"])
+    col_line   = get_col(["Line", "line"])
+    col_odds   = get_col(["Odds", "odds"])
+
+    if not all([col_player, col_stat, col_line, col_odds]):
+        print("[BatchDF] ❌ Missing required columns in input DataFrame.")
+        return pd.DataFrame()
+
+    results = []
+    for idx, row in df_input.iterrows():
+        try:
+            player = str(row[col_player]).strip()
+            stat = str(row[col_stat]).strip()
+            line = row[col_line]
+            odds = row[col_odds]
+            if not player or not stat:
+                continue
+            res = analyze_single_prop(player, stat, line, odds, settings, debug_mode=debug_mode)
+            if res:
+                results.append(res)
+        except Exception as e:
+            print(f"[BatchDF] ⚠️ Row {idx} failed: {e}")
+
+    return pd.DataFrame(results) if results else pd.DataFrame()
+
+def analyze_batch(df_input, settings=None, debug_mode=False):
+    """
+    Generic batch alias:
+      - If df_input is a DataFrame → uses analyze_batch_df
+      - If df_input is a list-of-dicts → uses batch_analyze_props
+    """
+    if isinstance(df_input, pd.DataFrame):
+        return analyze_batch_df(df_input, settings=settings, debug_mode=debug_mode)
+    elif isinstance(df_input, list):
+        settings = settings or load_settings()
+        results = batch_analyze_props(df_input, settings)
+        return pd.DataFrame(results) if results else pd.DataFrame()
+    else:
+        print("[Batch] ⚠️ Unsupported input type for analyze_batch.")
+        return pd.DataFrame()
+
 def main():
     settings = load_settings()
-    print("\n🧠 PropPulse+ Model v2025.4 — Player Prop EV Analyzer")
-    print("=====================================================\n")
+    print("\n🧠 PropPulse+ Model v2025.6 — Calibrated NBA Player Prop EV Analyzer")
+    print("=================================================================\n")
 
     while True:
         try:
@@ -1095,7 +1216,7 @@ def main():
             continue
 
         # ------------------------
-        # BATCH MODE
+        # BATCH MODE (CLI)
         # ------------------------
         if mode == "2":
             print("\n📦 Batch Mode: enter one prop per line.\nExample:  Jalen Brunson PRA 35.5 -110")
@@ -1111,14 +1232,14 @@ def main():
                     parts = line_in.split()
                     player = " ".join(parts[:-3])
                     stat = parts[-3].upper()
-                    line = float(parts[-2])
-                    odds = int(parts[-1])
+                    line_val = float(parts[-2])
+                    odds_val = int(parts[-1])
 
                     props.append({
                         "player": player,
                         "stat": stat,
-                        "line": line,
-                        "odds": odds,
+                        "line": line_val,
+                        "odds": odds_val,
                     })
                 except Exception:
                     print("⚠️ Invalid format. Use: PlayerName STAT LINE ODDS")
@@ -1146,6 +1267,7 @@ def main():
             continue
 
         print("⚠️ Invalid option.")
+
 # ===============================
 # 🚀 ENTRY POINT
 # ===============================
