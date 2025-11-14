@@ -423,252 +423,230 @@ def single_prop_view():
 
     st.markdown("#### 📈 Model Snapshot")
 
-    m1, m2, m3, m4 = st.columns(4)
+m1, m2, m3, m4 = st.columns(4)
+
 # ======================================================
-# 📊 PROJECTION CARD (with green/red arrow + glow)
+# 📊 PROJECTION CARD — Enhanced UI
 # ======================================================
 with m1:
-    # --------------------------------------------------
-    # Determine arrow + glow color
-    # --------------------------------------------------
+
+    # Determine arrow + color set
     try:
         p_val = float(proj) if proj is not None else None
         l_val = float(line) if line is not None else None
 
-        if p_val is not None and l_val is not None:
-            if p_val > l_val:
-                arrow = "▲"
-                arrow_color = "#22c55e"  # green
-                glow = "rgba(34,197,94,0.33)"
-                dir_text = "Higher"
-            elif p_val < l_val:
-                arrow = "▼"
-                arrow_color = "#ef4444"  # red
-                glow = "rgba(239,68,68,0.33)"
-                dir_text = "Lower"
-            else:
-                arrow = "▬"
-                arrow_color = "#60a5fa"  # blue
-                glow = "rgba(59,130,246,0.33)"
-                dir_text = "Even"
+        if p_val > l_val:
+            arrow = "▲"
+            color = "#22c55e"                     
+            glow = "rgba(34,197,94,0.45)"
+            bg_grad = "linear-gradient(135deg, rgba(34,197,94,0.20), rgba(34,197,94,0.05))"
+            dir_text = "Higher"
+        elif p_val < l_val:
+            arrow = "▼"
+            color = "#ef4444"                     
+            glow = "rgba(239,68,68,0.45)"
+            bg_grad = "linear-gradient(135deg, rgba(239,68,68,0.20), rgba(239,68,68,0.05))"
+            dir_text = "Lower"
         else:
             arrow = "▬"
-            arrow_color = "#60a5fa"
-            glow = "rgba(59,130,246,0.18)"
-            dir_text = "–"
+            color = "#3b82f6"                     
+            glow = "rgba(59,130,246,0.45)"
+            bg_grad = "linear-gradient(135deg, rgba(59,130,246,0.20), rgba(59,130,246,0.05))"
+            dir_text = "Even"
     except:
         arrow = "▬"
-        arrow_color = "#60a5fa"
-        glow = "rgba(59,130,246,0.18)"
+        color = "#64748b"
+        glow = "rgba(148,163,184,0.25)"
+        bg_grad = "linear-gradient(135deg, rgba(148,163,184,0.15), rgba(148,163,184,0.05))"
         dir_text = "–"
 
-    # --------------------------------------------------
-    # Render Card
-    # --------------------------------------------------
+    # Card UI
     st.markdown(
         f"""
         <div class="metric-card" style="
-            position: relative;
-            box-shadow: 0 0 28px {glow};
-            border: 1px solid rgba(148,163,184,0.35);
+            padding: 1rem 1.2rem;
+            background: {bg_grad};
+            border-radius: 15px;
+            border: 1px solid rgba(255,255,255,0.12);
+            box-shadow: 0 0 18px {glow};
         ">
+        <div style="font-size: 0.85rem; opacity: 0.8;">Projection</div>
+
+        <div style="
+            margin-top: 0.25rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 1.45rem;
+            font-weight: 700;
+        ">
+            <span>{proj:.2f}</span>
+            <span style="
+                color:{color};
+                font-size:1.6rem;
+                animation: float 1.2s infinite ease-in-out;
+            ">{arrow}</span>
+        </div>
+
+        <div style="margin-top: 0.1rem; font-size: 0.9rem; opacity: 0.8;">
+            Line {line} · {dir_text}
+        </div>
+        </div>
+
+        <style>
+        @keyframes float {
+            0% {{ transform: translateY(0px); }}
+            50% {{ transform: translateY(-3px); }}
+            100% {{ transform: translateY(0px); }}
+        }
+        </style>
         """,
         unsafe_allow_html=True,
     )
 
-    # Label
-    st.markdown('<div class="metric-label">Projection</div>', unsafe_allow_html=True)
+# ======================================================
+# 💰 EV CARD — Enhanced UI
+# ======================================================
+with m2:
 
-    # Main value + arrow
-    proj_display = f"{proj:.2f}" if proj is not None else "–"
+    try:
+        ev_val = float(ev_cents)
+        if ev_val >= 2:
+            color = "#22c55e"
+            bg_grad = "linear-gradient(135deg, rgba(34,197,94,0.20), rgba(34,197,94,0.05))"
+            glow = "rgba(34,197,94,0.45)"
+        elif ev_val <= -2:
+            color = "#ef4444"
+            bg_grad = "linear-gradient(135deg, rgba(239,68,68,0.20), rgba(239,68,68,0.05))"
+            glow = "rgba(239,68,68,0.45)"
+        else:
+            color = "#3b82f6"
+            bg_grad = "linear-gradient(135deg, rgba(59,130,246,0.20), rgba(59,130,246,0.05))"
+            glow = "rgba(59,130,246,0.45)"
+    except:
+        color = "#64748b"
+        bg_grad = "linear-gradient(135deg, rgba(148,163,184,0.15), rgba(148,163,184,0.05))"
+        glow = "rgba(148,163,184,0.25)"
+        ev_val = 0
+
     st.markdown(
         f"""
-        <div style="
-            display:flex;
-            justify-content:space-between;
-            align-items:center;
-            font-size:1.3rem;
-            font-weight:700;
-            margin-top:0.15rem;
-            color:var(--text-primary);
+        <div class="metric-card" style="
+            padding: 1rem 1.2rem;
+            background: {bg_grad};
+            border-radius: 15px;
+            border: 1px solid rgba(255,255,255,0.12);
+            box-shadow: 0 0 18px {glow};
         ">
-            <span>{proj_display}</span>
-            <span style="color:{arrow_color};font-size:1.4rem;margin-left:0.5rem;">
-                {arrow}
-            </span>
+
+        <div style="font-size: 0.85rem; opacity:0.8;">
+            Expected Value
+        </div>
+
+        <div style="font-size:1.45rem;font-weight:700;color:{color};margin-top:0.25rem;">
+            {ev_val:+.1f}¢
+        </div>
+
+        <div style="font-size:0.9rem; opacity:0.8;">
+            Per $1 exposure
+        </div>
+
         </div>
         """,
         unsafe_allow_html=True,
     )
 
-    # Subtext
-    st.markdown(
-        f'<div class="metric-sub">Line {line} · {dir_text}</div>',
-        unsafe_allow_html=True,
-    )
-
-    # CLOSE CARD
-    st.markdown("</div>", unsafe_allow_html=True)
-
-
-
 # ======================================================
-# 💰 EV CARD (±2¢ threshold coloring)
+# 🎯 MODEL VS BOOK
 # ======================================================
-with m2:
-    # Determine EV color
+with m3:
+
     try:
-        if ev_cents is not None:
-            ev_val = float(ev_cents)
-            if ev_val >= 2:
-                ev_color = "rgba(34,197,94,0.33)"   # green
-            elif ev_val <= -2:
-                ev_color = "rgba(239,68,68,0.33)"  # red
-            else:
-                ev_color = "rgba(59,130,246,0.33)" # blue
-        else:
-            ev_color = "rgba(59,130,246,0.18)"
+        mp = float(model_prob) * 100
+        mp_text = f"{mp:.1f}%"
     except:
-        ev_color = "rgba(59,130,246,0.18)"
+        mp_text = "–"
+
+    try:
+        bp = float(book_prob) * 100
+        bp_text = f"{bp:.1f}%"
+    except:
+        bp_text = "–"
 
     st.markdown(
         f"""
         <div class="metric-card" style="
-            box-shadow: 0 0 28px {ev_color};
-            border: 1px solid rgba(148,163,184,0.35);
+            padding: 1rem 1.2rem;
+            background: linear-gradient(135deg, rgba(99,102,241,0.20), rgba(99,102,241,0.05));
+            border-radius: 15px;
+            border: 1px solid rgba(255,255,255,0.12);
+            box-shadow: 0 0 18px rgba(99,102,241,0.35);
         ">
+
+        <div style="font-size:0.85rem;opacity:0.8;">
+            Model vs Book
+        </div>
+
+        <div style="font-size:1.45rem;font-weight:700;margin-top:0.25rem;">
+            {mp_text}
+        </div>
+
+        <div style="font-size:0.9rem;opacity:0.8;">
+            Book implied: {bp_text}
+        </div>
+
+        </div>
         """,
         unsafe_allow_html=True,
     )
 
-    st.markdown('<div class="metric-label">Expected Value</div>', unsafe_allow_html=True)
+# ======================================================
+# 📌 CONTEXT CARD
+# ======================================================
+with m4:
 
     try:
-        ev_val = float(ev_cents)
-        ev_str = f"{ev_val:+.1f}¢"
+        conf_str = f"{float(confidence)*100:.0f}%"
     except:
-        ev_str = "–"
+        conf_str = "–"
 
-    st.markdown(f'<div class="metric-value">{ev_str}</div>', unsafe_allow_html=True)
-    st.markdown('<div class="metric-sub">Per $1 exposure</div>', unsafe_allow_html=True)
-
-    st.markdown("</div>", unsafe_allow_html=True)
-
-
-    # ===============================
-    # 📊 MODEL VS BOOK CARD
-    # ===============================
-    with m3:
-        # Projection color reused to keep visual consistency
+    matchup_bits = []
+    if opponent: matchup_bits.append(f"vs {opponent}")
+    if position: matchup_bits.append(position)
+    if dvp_mult:
         try:
-            if proj is not None:
-                if float(proj) > float(line):
-                    proj_color = "rgba(34,197,94,0.28)"
-                elif float(proj) < float(line):
-                    proj_color = "rgba(239,68,68,0.28)"
-                else:
-                    proj_color = "rgba(59,130,246,0.28)"
-            else:
-                proj_color = "rgba(59,130,246,0.18)"
-        except:
-            proj_color = "rgba(59,130,246,0.18)"
-
-        st.markdown(
-            f'''
-            <div class="metric-card" style="
-                box-shadow: 0 0 25px {proj_color};
-                border: 1px solid rgba(148,163,184,0.35);
-            ">
-            ''',
-            unsafe_allow_html=True,
-        )
-
-        st.markdown('<div class="metric-label">Model vs Book</div>', unsafe_allow_html=True)
-
-        if model_prob is not None and book_prob is not None:
-            try:
-                mp = float(model_prob) * 100
-                bp = float(book_prob) * 100
-                st.markdown(
-                    f'<div class="metric-value">{mp:.1f}%</div>',
-                    unsafe_allow_html=True,
-                )
-                st.markdown(
-                    f'<div class="metric-sub">Book implied: {bp:.1f}%</div>',
-                    unsafe_allow_html=True,
-                )
-            except:
-                st.markdown('<div class="metric-value">–</div>', unsafe_allow_html=True)
-                st.markdown('<div class="metric-sub">No prob data</div>', unsafe_allow_html=True)
-        else:
-            st.markdown('<div class="metric-value">–</div>', unsafe_allow_html=True)
-            st.markdown('<div class="metric-sub">No prob data</div>', unsafe_allow_html=True)
-
-        st.markdown("</div>", unsafe_allow_html=True)
-
-    # ===============================
-    # 📌 CONTEXT CARD
-    # ===============================
-    with m4:
-        st.markdown('<div class="metric-card">', unsafe_allow_html=True)
-        st.markdown('<div class="metric-label">Context</div>', unsafe_allow_html=True)
-
-        try:
-            conf_str = f"{float(confidence)*100:.0f}%" if confidence is not None else "–"
-        except:
-            conf_str = "–"
-
-        matchup_bits = []
-        if opponent and opponent != "–":
-            matchup_bits.append(f"vs {opponent}")
-        if position and position != "–":
-            matchup_bits.append(position)
-        try:
-            if dvp_mult is not None and dvp_mult != "":
-                dvp_val = float(dvp_mult)
-                matchup_bits.append(f"DvP {dvp_val:.2f}×")
+            matchup_bits.append(f"DvP {float(dvp_mult):.2f}×")
         except:
             pass
 
-        sub_text = " · ".join(matchup_bits) if matchup_bits else "No matchup data"
+    sub_text = " · ".join(matchup_bits) if matchup_bits else "No matchup data"
 
-        st.markdown(
-            f'<div class="metric-value">{conf_str}</div>',
-            unsafe_allow_html=True,
-        )
-        st.markdown(
-            f'<div class="metric-sub">{sub_text}</div>',
-            unsafe_allow_html=True,
-        )
+    st.markdown(
+        f"""
+        <div class="metric-card" style="
+            padding: 1rem 1.2rem;
+            background: linear-gradient(135deg, rgba(250,204,21,0.20), rgba(250,204,21,0.05));
+            border-radius: 15px;
+            border: 1px solid rgba(255,255,255,0.12);
+            box-shadow: 0 0 18px rgba(250,204,21,0.35);
+        ">
 
-        st.markdown("</div>", unsafe_allow_html=True)
+        <div style="font-size:0.85rem;opacity:0.8;">Context</div>
 
-    # ===============================
-    # 🧪 RAW RESULT TABLE
-    # ===============================
-    st.markdown("#### 🔬 Full Result Row")
-    st.dataframe(df_res, use_container_width=True)
+        <div style="font-size:1.45rem;font-weight:700;margin-top:0.25rem;">
+            {conf_str}
+        </div>
 
-    # ===============================
-    # 📈 Optional distribution chart
-    # ===============================
-    if "Distribution" in df_res.columns and isinstance(
-        df_res["Distribution"].iloc[0], (list, tuple, np.ndarray)
-    ):
-        try:
-            dist_vals = np.array(df_res["Distribution"].iloc[0], dtype=float)
-            x = np.arange(len(dist_vals))
-            fig = go.Figure()
-            fig.add_trace(go.Bar(x=x, y=dist_vals))
-            fig.update_layout(
-                title="Model Distribution (simulated outcomes)",
-                xaxis_title=stat,
-                yaxis_title="Probability",
-                bargap=0.02,
-            )
-            st.plotly_chart(fig, use_container_width=True)
-        except:
-            pass
+        <div style="font-size:0.9rem;opacity:0.8;">
+            {sub_text}
+        </div>
+
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+
 
 
 # ===============================
