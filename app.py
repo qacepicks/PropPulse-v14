@@ -425,58 +425,95 @@ def single_prop_view():
 
     m1, m2, m3, m4 = st.columns(4)
 
-        # ===============================
-    # 📈 PROJECTION CARD
-    # ===============================
-    with m1:
-        # ======================================================
-        # 🎨 Dynamic projection color (green=over, red=under)
-        # ======================================================
-        try:
-            if proj is not None and line is not None:
-                p_val = float(proj)
-                l_val = float(line)
-                if p_val > l_val:
-                    proj_color = "rgba(34,197,94,0.33)"   # green
-                elif p_val < l_val:
-                    proj_color = "rgba(239,68,68,0.33)"  # red
-                else:
-                    proj_color = "rgba(59,130,246,0.33)" # blue
+       # ======================================================
+# 📊 PROJECTION CARD (with green/red arrow + glow)
+# ======================================================
+with m1:
+    # --------------------------------------------------
+    # Determine arrow + glow color
+    # --------------------------------------------------
+    try:
+        p_val = float(proj) if proj is not None else None
+        l_val = float(line) if line is not None else None
+
+        if p_val is not None and l_val is not None:
+            if p_val > l_val:
+                arrow = "▲"
+                arrow_color = "#22c55e"  # green
+                glow = "rgba(34,197,94,0.33)"
+                dir_text = "Higher"
+            elif p_val < l_val:
+                arrow = "▼"
+                arrow_color = "#ef4444"  # red
+                glow = "rgba(239,68,68,0.33)"
+                dir_text = "Lower"
             else:
-                proj_color = "rgba(59,130,246,0.18)"      # fallback
-        except:
-            proj_color = "rgba(59,130,246,0.18)"
-
-        # Projection Card
-        st.markdown(
-            f"""
-            <div class="metric-card" style="
-                box-shadow: 0 0 28px {proj_color};
-                border: 1px solid rgba(148,163,184,0.35);
-            ">
-            """,
-            unsafe_allow_html=True,
-        )
-
-        st.markdown('<div class="metric-label">Projection</div>', unsafe_allow_html=True)
-
-        proj_display = f"{proj:.2f}" if proj is not None else "–"
-        st.markdown(
-            f'<div class="metric-value">{proj_display}</div>',
-            unsafe_allow_html=True,
-        )
-
-        try:
-            dir_text = "Higher" if float(proj) > float(line) else "Lower"
-        except:
+                arrow = "▬"
+                arrow_color = "#60a5fa"  # blue
+                glow = "rgba(59,130,246,0.33)"
+                dir_text = "Even"
+        else:
+            arrow = "▬"
+            arrow_color = "#60a5fa"
+            glow = "rgba(59,130,246,0.18)"
             dir_text = "–"
+    except:
+        arrow = "▬"
+        arrow_color = "#60a5fa"
+        glow = "rgba(59,130,246,0.18)"
+        dir_text = "–"
 
-        st.markdown(
-            f'<div class="metric-sub">Line {line} · {dir_text}</div>',
-            unsafe_allow_html=True,
-        )
+    # --------------------------------------------------
+    # Render Card
+    # --------------------------------------------------
+    st.markdown(
+        f"""
+        <div class="metric-card" style="
+            position: relative;
+            box-shadow: 0 0 28px {glow};
+            border: 1px solid rgba(148,163,184,0.35);
+        ">
+        """,
+        unsafe_allow_html=True,
+    )
 
-        st.markdown("</div>", unsafe_allow_html=True)
+    # Label
+    st.markdown(
+        '<div class="metric-label">Projection</div>',
+        unsafe_allow_html=True,
+    )
+
+    # Main value + arrow (right-aligned)
+    proj_display = f"{proj:.2f}" if proj is not None else "–"
+    st.markdown(
+        f"""
+        <div style="
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            font-size: 1.3rem;
+            font-weight: 700;
+            margin-top: 0.15rem;
+            color: var(--text-primary);
+        ">
+            <span>{proj_display}</span>
+            <span style="color:{arrow_color};font-size:1.4rem;margin-left:0.5rem;">
+                {arrow}
+            </span>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+    # Subtext (direction)
+    st.markdown(
+        f'<div class="metric-sub">Line {line} · {dir_text}</div>',
+        unsafe_allow_html=True,
+    )
+
+    # CLOSE CARD
+    st.markdown("</div>", unsafe_allow_html=True)
+
 
     # ===============================
     # 💰 EV CARD (±2¢ threshold coloring)
